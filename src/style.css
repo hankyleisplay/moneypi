@@ -26,7 +26,12 @@ body{margin:0;color:var(--fg);background:#fff;font:14px/1.5 "Segoe UI Variable",
 /* ---------- layout ---------- */
 .app{height:100vh;display:grid;grid-template-columns:auto minmax(0,1fr);gap:14px;padding:16px}
 .side{width:320px;height:100%;display:flex;flex-direction:column;gap:10px;padding:14px;overflow:hidden;transition:width .3s cubic-bezier(.3,.8,.3,1)}
-.side.collapsed{width:76px}
+.side.collapsed{width:56px;height:auto;max-height:100%;align-self:start;padding:8px 6px;gap:6px;border-radius:20px}
+.side.collapsed .list{flex:0 1 auto;gap:2px;margin:0 -2px;padding:0 2px}
+.side.collapsed .av{width:30px;height:30px;font-size:13px}
+.side.collapsed .logo{width:30px;height:30px;font-size:16px}
+.side.collapsed button.icon{width:28px;height:28px}
+.side.collapsed .nav,.side.collapsed .item{padding:3px;border-radius:50%;width:auto;margin:0 auto}
 .content{min-width:0;height:100%;overflow-y:auto;display:flex;flex-direction:column;gap:14px;padding:2px 4px 24px 2px;scrollbar-width:thin}
 .view{display:grid;gap:14px}
 .view[hidden]{display:none}
@@ -37,7 +42,7 @@ body{margin:0;color:var(--fg);background:#fff;font:14px/1.5 "Segoe UI Variable",
   background:linear-gradient(145deg,#6ea8ff,#8b5cf6);box-shadow:inset 0 1.5px 0 rgba(255,255,255,.65),0 4px 12px rgba(90,100,255,.35)}
 h1{margin:0;font-size:18px;white-space:nowrap} h2{margin:0;font-size:17px} h3{margin:0;font-size:15px} h4{margin:14px 0 6px;font-size:13px;color:var(--muted);font-weight:500}
 dialog h3{font-size:18px;margin-bottom:4px}
-.side.collapsed .side-head{flex-direction:column;gap:10px}
+.side.collapsed .side-head{flex-direction:column;gap:8px;min-height:0}
 .side.collapsed .brand h1,.side.collapsed .lbl,.side.collapsed .side-tools,.side.collapsed .empty{display:none}
 .side.collapsed #collapse-btn svg{transform:rotate(180deg)}
 #collapse-btn svg{transition:transform .3s}
@@ -56,14 +61,13 @@ button.icon{width:34px;height:34px;padding:0;display:grid;place-items:center;fle
 button.link{border:0;background:none;box-shadow:none;color:var(--accent);padding:2px 8px;backdrop-filter:none}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .add{display:flex;align-items:center;justify-content:center;gap:6px}
-.side.collapsed .add{padding:0;width:44px;height:44px;margin:0 auto}
+.side.collapsed .add{padding:0;width:32px;height:32px;margin:2px auto 0}
 
 /* ---------- sidebar ---------- */
 .nav,.item{display:flex;align-items:center;gap:11px;width:100%;text-align:left;padding:8px 10px;border-radius:16px;
   background:transparent;border:1px solid transparent;box-shadow:none;backdrop-filter:none}
 .nav:hover,.item:hover{background:rgba(255,255,255,.65);box-shadow:none;transform:none}
 .nav.on,.item.on{background:var(--glass-hi);border-color:var(--line);box-shadow:0 4px 14px rgba(40,55,120,.12),inset 0 1.5px 0 #fff}
-.side.collapsed .nav,.side.collapsed .item{padding:6px;justify-content:center}
 .av{flex:none;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-weight:600;font-size:14px;color:#fff;
   background:#6aa5ff;box-shadow:inset 0 1.5px 0 rgba(255,255,255,.55),0 3px 8px rgba(40,55,120,.2)}
 .nav .av{background:linear-gradient(145deg,#6ea8ff,#8b5cf6)}
@@ -171,4 +175,4 @@ menu{display:flex;justify-content:flex-end;gap:8px;padding:0;margin:18px 0 0}
 #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);padding:10px 22px;border-radius:999px;z-index:60;animation:pop .25s}
 
 @media (max-width:980px){.charts{grid-template-columns:1fr}}
-@media (max-width:640px){.app{padding:10px;gap:10px}.side{width:250px}.side.collapsed{width:68px}.bar{border-radius:24px}}
+@media (max-width:640px){.app{padding:10px;gap:10px}.side{width:250px}.bar{border-radius:24px}}

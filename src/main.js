@@ -131,7 +131,9 @@ function setCollapsed(c) {
   $("collapse-btn").title = $("collapse-btn").ariaLabel = c ? "展開清單" : "收合清單";
   store.set("collapsed", c ? "1" : "0");
 }
+side.style.transition = "none"; // no slide animation on first paint
 setCollapsed(store.get("collapsed", innerWidth < 760 ? "1" : "0") === "1");
+requestAnimationFrame(() => requestAnimationFrame(() => (side.style.transition = "")));
 $("collapse-btn").onclick = () => setCollapsed(!side.classList.contains("collapsed"));
 $("hide-btn").onclick = () => {
   ui.hidden = !ui.hidden;
