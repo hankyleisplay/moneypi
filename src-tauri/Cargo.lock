@@ -1928,12 +1928,14 @@ dependencies = [
 
 [[package]]
 name = "moneypi"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
+ "getrandom 0.2.17",
  "qrcode",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-updater",

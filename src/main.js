@@ -38,7 +38,7 @@ async function invoke(cmd, args = {}) {
       throw "無法連線到電腦，請確認在同一個 Wi-Fi 且電腦上的 MoneyPi 正在執行";
     }
     if (r.status === 401) {
-      token = await askPin(token ? "PIN 錯誤，請重新輸入" : "");
+      token = await askPin(token ? "PIN 或連線密鑰錯誤。若是遠端連線，請回電腦重新掃描 QR Code" : "");
       store.set("token", token);
       continue;
     }
@@ -1236,14 +1236,94 @@ function showPhone(i) {
     : '<p class="muted">找不到區網位址，請確認電腦已連上 Wi-Fi 或網路。</p>';
   $("ph-status").textContent = i.running ? "● 服務執行中" : i.enabled ? "服務未能啟動（連接埠可能被占用，請換一個）" : "未啟用";
   $("ph-status").className = "hint " + (i.running ? "pos" : "");
-  $("phone-btn").classList.toggle("live", i.running);
+  $("phone-btn").classList.toggle("live-lan", i.running);
+  $("phone-btn").classList.toggle("live", i.running || $("phone-btn").classList.contains("live-tunnel"));
 }
 $("phone-btn").onclick = async () => {
   $("pherr").textContent = "";
   $("ph-tips").hidden = true;
+  setPhTab("lan");
   phdlg.showModal();
   try { showPhone(await invoke("get_sync")); } catch (err) { $("pherr").textContent = String(err); }
 };
+
+/* ---- remote access through a Cloudflare quick tunnel ---- */
+function setPhTab(t) {
+  [...$("ph-tabs").children].forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+  $("ph-lan").hidden = t !== "lan";
+  $("ph-remote").hidden = t !== "remote";
+  $("ph-apply").hidden = t !== "lan";
+  $("pherr").textContent = "";
+  if (t === "remote") refreshTunnel();
+}
+$("ph-tabs").onclick = (e) => { const b = e.target.closest("button"); if (b) setPhTab(b.dataset.t); };
+
+const INSTALL_NOTE = "需要 Cloudflare 的 cloudflared 工具（約 55 MB）。只從官方發布頁下載，並核對官方公布的校驗碼，通過才會安裝；安裝在 MoneyPi 自己的資料夾，不需要系統管理員權限。";
+function renderTunnel(s, busy = "") {
+  $("phone-btn").classList.toggle("live-tunnel", !!s.running);
+  $("phone-btn").classList.toggle("live", !!s.running || $("phone-btn").classList.contains("live-lan"));
+  const b = $("rm-body");
+  if (busy) { b.innerHTML = `<p class="hint">${esc(busy)}</p>`; return; }
+  if (!s.installed) {
+    b.innerHTML = `<p class="hint">${INSTALL_NOTE}</p><button type="button" class="primary" id="rm-install">安裝 cloudflared</button>`;
+  } else if (!s.running) {
+    b.innerHTML = `<button type="button" class="primary" id="rm-start">開啟遠端連線</button>
+      <p class="hint">每次開啟都會產生新的網址與一次性密鑰，關閉或結束 MoneyPi 後網址立即失效。資料會經過 Cloudflare 的伺服器（到 Cloudflare 為 HTTPS 加密），請只在你能接受的情況下使用。</p>`;
+  } else {
+    b.innerHTML = `<p class="hint pos">● 遠端連線已開啟</p>
+      <div class="conn"><div class="qr">${s.qr || ""}</div><div class="conn-t">
+        <p class="muted">用手機相機掃描 QR Code（行動數據即可）：</p>
+        <div class="url">${esc(s.url)}</div>
+        <p class="hint">QR Code 內含這次連線專用的密鑰，請勿分享給別人。</p></div></div>
+      <button type="button" class="danger" id="rm-stop">關閉遠端連線</button>`;
+  }
+}
+async function refreshTunnel() {
+  try { renderTunnel(await invoke("tunnel_status")); } catch (err) { $("pherr").textContent = String(err); }
+}
+async function installCloudflared() {
+  if (!(await confirmBox("安裝 cloudflared？", INSTALL_NOTE, "安裝"))) return false;
+  try {
+    renderTunnel({}, "下載並驗證中（約 55 MB），請稍候…");
+    renderTunnel(await invoke("tunnel_install"));
+    toast("cloudflared 已安裝");
+    return true;
+  } catch (err) {
+    $("pherr").textContent = "安裝失敗：" + err;
+    refreshTunnel();
+    return false;
+  }
+}
+$("rm-body").onclick = async (e) => {
+  const id = e.target.closest("button")?.id;
+  $("pherr").textContent = "";
+  try {
+    if (id === "rm-install") await installCloudflared();
+    else if (id === "rm-start") {
+      renderTunnel({}, "正在建立遠端連線（約數秒）…");
+      renderTunnel(await invoke("tunnel_start"));
+    } else if (id === "rm-stop") renderTunnel(await invoke("tunnel_stop"));
+  } catch (err) {
+    $("pherr").textContent = String(err);
+    refreshTunnel();
+  }
+};
+
+// after installing MoneyPi, offer once to set up remote access (declining is fine; it can be done later)
+async function offerRemoteInstall() {
+  if (!inTauri || store.get("remote_prompted", "0") === "1") return;
+  if (document.querySelector("dialog[open]")) return setTimeout(offerRemoteInstall, 30000);
+  try {
+    const s = await invoke("tunnel_status");
+    store.set("remote_prompted", "1");
+    if (s.installed) return;
+    if (await confirmBox("要啟用遠端連線功能嗎？", "遠端連線讓你不用同一個 Wi-Fi，在外面也能用手機連回這台電腦。需要下載 Cloudflare 的 cloudflared 工具（約 55 MB，官方來源並核對校驗碼）。不安裝也能正常使用 MoneyPi，之後隨時可以在「手機連線 → 遠端」補裝。", "安裝")) {
+      toast("下載並驗證中…");
+      await invoke("tunnel_install");
+      toast("cloudflared 已安裝，可到「手機連線 → 遠端」開啟");
+    }
+  } catch (err) { toast("安裝失敗：" + err); }
+}
 $("ph-tips-btn").onclick = () => ($("ph-tips").hidden = !$("ph-tips").hidden);
 $("phform").onsubmit = async (e) => {
   e.preventDefault();
@@ -1319,7 +1399,8 @@ invoke("get_data")
   })
   .catch((err) => toast(String(err)));
 if (inTauri) {
-  invoke("get_sync").then((i) => $("phone-btn").classList.toggle("live", i.running)).catch(() => {});
+  invoke("get_sync").then(showPhone).catch(() => {});
   setTimeout(() => checkUpdate(false), 4000);
+  setTimeout(offerRemoteInstall, 9000);
   setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
 }

@@ -1,14 +1,16 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
+    io::{BufRead, BufReader, Read, Write},
     net::UdpSocket,
-    path::PathBuf,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{mpsc, Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
@@ -354,6 +356,119 @@ struct Core {
     path: PathBuf,
     data: Mutex<Data>,
     server: Mutex<Option<Arc<tiny_http::Server>>>,
+    tunnel: Mutex<Option<Tunnel>>,
+    /// Consecutive failed LAN PIN attempts and the end of the current lockout.
+    auth_fail: Mutex<(u32, Option<Instant>)>,
+}
+
+/// A running Cloudflare quick tunnel. Killed when dropped.
+struct Tunnel {
+    child: Child,
+    url: String,
+    /// Per-tunnel secret; the only credential accepted for requests that arrive through the tunnel.
+    token: String,
+    /// The HTTP server was started only for the tunnel (loopback), so stop it with the tunnel.
+    started_server: bool,
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+enum Auth {
+    Ok,
+    Denied,
+    Locked,
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut b = vec![0u8; bytes];
+    getrandom::getrandom(&mut b).expect("OS random generator unavailable");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Constant-time comparison; an empty expected secret never matches.
+fn check_secret(expected: &str, given: &str) -> bool {
+    !expected.is_empty()
+        && expected.len() == given.len()
+        && expected.bytes().zip(given.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+}
+
+/// Pull the quick-tunnel address out of a cloudflared log line.
+fn extract_tunnel_url(line: &str) -> Option<String> {
+    let i = line.find("https://")?;
+    let url: String = line[i..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':' | '/'))
+        .collect();
+    let host = url.trim_start_matches("https://");
+    (host.ends_with(".trycloudflare.com") && !host.starts_with("api.")).then_some(url)
+}
+
+const CLOUDFLARED_ASSET: &str = "cloudflared-windows-amd64.exe";
+const CLOUDFLARED_RELEASES: &str = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest";
+
+/// Download the official cloudflared build and install it only if it matches the SHA-256
+/// digest GitHub publishes for the release asset.
+fn download_cloudflared(dest: &Path) -> Result<(), String> {
+    let rel: Value = ureq::get(CLOUDFLARED_RELEASES)
+        .set("User-Agent", "MoneyPi")
+        .set("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(20))
+        .call()
+        .map_err(|e| format!("無法取得版本資訊：{e}"))?
+        .into_json()
+        .map_err(|e| format!("版本資訊格式錯誤：{e}"))?;
+    let asset = rel["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"] == CLOUDFLARED_ASSET))
+        .ok_or("找不到 Windows 版安裝檔")?;
+    let url = asset["browser_download_url"].as_str().ok_or("找不到下載網址")?;
+    if !url.starts_with("https://github.com/cloudflare/cloudflared/releases/download/") {
+        return Err("下載網址不在預期的官方來源，已中止".into());
+    }
+    let want = asset["digest"]
+        .as_str()
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .ok_or("官方發布未附校驗碼，已中止")?
+        .to_ascii_lowercase();
+
+    let resp = ureq::get(url)
+        .set("User-Agent", "MoneyPi")
+        .timeout(Duration::from_secs(600))
+        .call()
+        .map_err(|e| format!("下載失敗：{e}"))?;
+    let mut reader = resp.into_reader();
+    let part = dest.with_extension("exe.part");
+    let result = (|| -> Result<String, String> {
+        let mut f = fs::File::create(&part).map_err(|e| e.to_string())?;
+        let (mut hasher, mut buf) = (Sha256::new(), vec![0u8; 64 * 1024]);
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| format!("下載中斷：{e}"))?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        }
+        f.flush().map_err(|e| e.to_string())?;
+        Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    })();
+    let got = match result {
+        Ok(h) => h,
+        Err(e) => {
+            let _ = fs::remove_file(&part);
+            return Err(e);
+        }
+    };
+    if got != want {
+        let _ = fs::remove_file(&part);
+        return Err("下載檔案的校驗碼不符，已中止（檔案可能損毀或被竄改）".into());
+    }
+    fs::rename(&part, dest).map_err(|e| e.to_string())
 }
 
 impl Core {
@@ -744,6 +859,9 @@ impl Core {
         if enabled && !(pin.len() >= 4 && pin.len() <= 12 && pin.chars().all(|c| c.is_ascii_digit())) {
             return Err("PIN 需為 4–12 位數字".into());
         }
+        if self.data.lock().unwrap().sync_port != port {
+            self.tunnel_stop(); // it points at the old port
+        }
         self.stop_server();
         {
             let mut d = self.data.lock().unwrap();
@@ -754,12 +872,158 @@ impl Core {
             fs::write(&self.path, json).map_err(|e| e.to_string())?;
         }
         if enabled {
-            if let Err(e) = self.start_server(port) {
+            if let Err(e) = self.start_server("0.0.0.0", port) {
                 self.data.lock().unwrap().sync_enabled = false;
                 return Err(e);
             }
+        } else if self.tunnel.lock().unwrap().is_some() {
+            // LAN sync switched off, but the tunnel still needs a (loopback) server
+            self.start_server("127.0.0.1", port)?;
         }
         Ok(self.sync_info())
+    }
+
+    // ----------------------------------------------------- remote tunnel
+
+    fn find_cloudflared(&self) -> Option<PathBuf> {
+        let mut c: Vec<PathBuf> = vec![];
+        // our own verified copy first
+        if let Some(dir) = self.path.parent() {
+            c.push(dir.join("bin").join("cloudflared.exe"));
+        }
+        if let Some(p) = std::env::var_os("PATH") {
+            c.extend(std::env::split_paths(&p).map(|d| d.join("cloudflared.exe")));
+        }
+        for var in ["ProgramFiles(x86)", "ProgramFiles"] {
+            if let Some(b) = std::env::var_os(var) {
+                c.push(PathBuf::from(b).join("cloudflared").join("cloudflared.exe"));
+            }
+        }
+        if let Some(b) = std::env::var_os("LOCALAPPDATA") {
+            c.push(PathBuf::from(b).join("Microsoft").join("WinGet").join("Links").join("cloudflared.exe"));
+        }
+        c.into_iter().find(|p| p.is_file())
+    }
+
+    fn tunnel_status(&self) -> Value {
+        let installed = self.find_cloudflared();
+        let mut t = self.tunnel.lock().unwrap();
+        if t.as_mut().is_some_and(|x| matches!(x.child.try_wait(), Ok(Some(_)))) {
+            *t = None; // cloudflared exited on its own
+        }
+        let (running, url, link) = match &*t {
+            Some(x) => (true, Some(x.url.clone()), Some(format!("{}/#pin={}", x.url, x.token))),
+            None => (false, None, None),
+        };
+        let qr = link.as_deref().and_then(qr_svg);
+        // `link` embeds the secret: it is only ever returned to the desktop window, never over HTTP
+        json!({ "installed": installed.is_some(), "running": running, "url": url, "link": link, "qr": qr })
+    }
+
+    fn tunnel_install(&self) -> Result<Value, String> {
+        if self.find_cloudflared().is_none() {
+            let dir = self.path.parent().ok_or("找不到資料夾")?.join("bin");
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            download_cloudflared(&dir.join("cloudflared.exe"))?;
+        }
+        Ok(self.tunnel_status())
+    }
+
+    fn tunnel_start(self: &Arc<Self>) -> Result<Value, String> {
+        if self.tunnel.lock().unwrap().is_some() {
+            return Ok(self.tunnel_status());
+        }
+        let exe = self.find_cloudflared().ok_or("尚未安裝 cloudflared")?;
+        let port = self.data.lock().unwrap().sync_port;
+        let mut started_server = false;
+        if self.server.lock().unwrap().is_none() {
+            self.start_server("127.0.0.1", port)?; // loopback only: just for the tunnel
+            started_server = true;
+        }
+        let mut cmd = Command::new(&exe);
+        cmd.args(["tunnel", "--url", &format!("http://127.0.0.1:{port}"), "--no-autoupdate"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // no console window
+        }
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                if started_server {
+                    self.stop_server();
+                }
+                return Err(format!("無法啟動 cloudflared：{e}"));
+            }
+        };
+        let stderr = child.stderr.take().ok_or("無法讀取 cloudflared 輸出")?;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut sent = false;
+            // keep draining so cloudflared never blocks on a full pipe
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if !sent {
+                    if let Some(u) = extract_tunnel_url(&line) {
+                        let _ = tx.send(u);
+                        sent = true;
+                    }
+                }
+            }
+        });
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(url) => {
+                *self.tunnel.lock().unwrap() = Some(Tunnel { child, url, token: random_hex(16), started_server });
+                Ok(self.tunnel_status())
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if started_server {
+                    self.stop_server();
+                }
+                Err("無法建立遠端連線，請確認電腦可以上網後再試".into())
+            }
+        }
+    }
+
+    fn tunnel_stop(&self) -> Value {
+        let t = self.tunnel.lock().unwrap().take();
+        if let Some(t) = t {
+            let started = t.started_server;
+            drop(t); // kills cloudflared
+            if started && !self.data.lock().unwrap().sync_enabled {
+                self.stop_server();
+            }
+        }
+        self.tunnel_status()
+    }
+
+    /// Requests that came through the tunnel (Cloudflare adds its headers) must present the
+    /// per-tunnel secret; the LAN PIN is not accepted there. LAN requests use the PIN, with a lockout.
+    fn authorize(&self, pin: &str, remote_token: Option<&str>, via_tunnel: bool, given: &str) -> Auth {
+        if via_tunnel {
+            return if remote_token.is_some_and(|t| check_secret(t, given)) { Auth::Ok } else { Auth::Denied };
+        }
+        let mut f = self.auth_fail.lock().unwrap();
+        if let Some(until) = f.1 {
+            if Instant::now() < until {
+                return Auth::Locked;
+            }
+            *f = (0, None);
+        }
+        if check_secret(pin, given) {
+            f.0 = 0;
+            Auth::Ok
+        } else {
+            f.0 += 1;
+            if f.0 >= 10 {
+                f.1 = Some(Instant::now() + Duration::from_secs(60));
+            }
+            Auth::Denied
+        }
     }
 
     fn stop_server(&self) {
@@ -768,9 +1032,9 @@ impl Core {
         }
     }
 
-    fn start_server(self: &Arc<Self>, port: u16) -> Result<(), String> {
+    fn start_server(self: &Arc<Self>, host: &str, port: u16) -> Result<(), String> {
         let server = Arc::new(
-            tiny_http::Server::http(("0.0.0.0", port)).map_err(|e| format!("無法啟動同步服務（連接埠 {port}）：{e}"))?,
+            tiny_http::Server::http((host, port)).map_err(|e| format!("無法啟動同步服務（連接埠 {port}）：{e}"))?,
         );
         *self.server.lock().unwrap() = Some(server.clone());
         let core = self.clone();
@@ -890,6 +1154,10 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "delete_flow" => core.delete_flow(arg(&args, "id")?),
         "export_backup" => Ok(Value::String(core.export_backup())),
         "import_backup" => core.import_backup(&arg::<String>(&args, "text")?),
+        "tunnel_status" if !remote => Ok(core.tunnel_status()),
+        "tunnel_install" if !remote => core.tunnel_install(),
+        "tunnel_start" if !remote => core.tunnel_start(),
+        "tunnel_stop" if !remote => Ok(core.tunnel_stop()),
         "get_sync" if !remote => Ok(core.sync_info()),
         "set_sync" if !remote => core.set_sync(arg(&args, "enabled")?, arg(&args, "port")?, arg(&args, "pin")?),
         _ => Err(format!("不支援的命令：{cmd}")),
@@ -945,11 +1213,17 @@ fn handle_http(core: Arc<Core>, mut req: tiny_http::Request) {
     };
     let cmd = cmd.to_string();
 
-    let pin = core.data.lock().unwrap().sync_pin.clone();
+    let via_tunnel = header(&req, "Cf-Connecting-Ip").is_some() || header(&req, "Cf-Ray").is_some();
     let given = header(&req, "X-Token").unwrap_or("").to_string();
-    if pin.is_empty() || given != pin {
-        thread::sleep(Duration::from_secs(1)); // slow down PIN guessing
-        return reply(req, 401, json!({ "error": "PIN 錯誤" }));
+    let pin = core.data.lock().unwrap().sync_pin.clone();
+    let remote_token = core.tunnel.lock().unwrap().as_ref().map(|t| t.token.clone());
+    match core.authorize(&pin, remote_token.as_deref(), via_tunnel, &given) {
+        Auth::Ok => {}
+        Auth::Locked => return reply(req, 429, json!({ "error": "嘗試次數過多，請稍後再試" })),
+        Auth::Denied => {
+            thread::sleep(Duration::from_secs(1)); // slow down guessing
+            return reply(req, 401, json!({ "error": "PIN 或連線密鑰錯誤" }));
+        }
     }
 
     let mut body = String::new();
@@ -1053,9 +1327,15 @@ pub fn run() {
             let mut data = data;
             migrate(&mut data);
             let (enabled, port) = (data.sync_enabled, data.sync_port);
-            let core = Arc::new(Core { path, data: Mutex::new(data), server: Mutex::new(None) });
+            let core = Arc::new(Core {
+                path,
+                data: Mutex::new(data),
+                server: Mutex::new(None),
+                tunnel: Mutex::new(None),
+                auth_fail: Mutex::new((0, None)),
+            });
             if enabled {
-                if let Err(e) = core.start_server(port) {
+                if let Err(e) = core.start_server("0.0.0.0", port) {
                     eprintln!("{e}");
                 }
             }
@@ -1063,8 +1343,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![call, app_version, check_update, install_update])
-        .run(tauri::generate_context!())
-        .expect("error while running MoneyPi");
+        .build(tauri::generate_context!())
+        .expect("error while building MoneyPi")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(core) = app.try_state::<Arc<Core>>() {
+                    core.tunnel_stop(); // never leave cloudflared running after the app closes
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1152,6 +1439,69 @@ mod tests {
     fn private_ip_filter() {
         assert!(is_private_ip("192.168.1.5") && is_private_ip("10.0.0.2") && is_private_ip("172.20.1.1"));
         assert!(!is_private_ip("172.32.0.1") && !is_private_ip("169.254.1.1") && !is_private_ip("8.8.8.8"));
+    }
+
+    #[test]
+    fn tunnel_url_extraction() {
+        let line = "2026-10-25T10:00:00Z INF |  https://wise-owl-demo-1234.trycloudflare.com                            |";
+        assert_eq!(extract_tunnel_url(line).as_deref(), Some("https://wise-owl-demo-1234.trycloudflare.com"));
+        assert_eq!(extract_tunnel_url("INF Requesting new quick Tunnel on trycloudflare.com..."), None);
+        assert_eq!(extract_tunnel_url("ERR failed https://api.trycloudflare.com/tunnel"), None);
+        assert_eq!(extract_tunnel_url("see https://example.com/docs"), None);
+    }
+
+    #[test]
+    fn secrets_compare_strictly() {
+        assert!(check_secret("abc123", "abc123"));
+        assert!(!check_secret("abc123", "abc124") && !check_secret("abc123", "abc12") && !check_secret("", ""));
+        assert_eq!(random_hex(16).len(), 32);
+        assert_ne!(random_hex(16), random_hex(16));
+    }
+
+    fn test_core() -> Core {
+        Core {
+            path: PathBuf::new(),
+            data: Mutex::new(Data::default()),
+            server: Mutex::new(None),
+            tunnel: Mutex::new(None),
+            auth_fail: Mutex::new((0, None)),
+        }
+    }
+
+    #[test]
+    fn tunnel_requests_need_the_tunnel_secret_not_the_pin() {
+        let c = test_core();
+        // via tunnel: PIN is useless, only the per-tunnel token works
+        assert!(matches!(c.authorize("123456", Some("tok"), true, "123456"), Auth::Denied));
+        assert!(matches!(c.authorize("123456", Some("tok"), true, "tok"), Auth::Ok));
+        assert!(matches!(c.authorize("123456", None, true, "tok"), Auth::Denied)); // no tunnel running
+        // LAN: PIN works, token does not
+        assert!(matches!(c.authorize("123456", Some("tok"), false, "123456"), Auth::Ok));
+        assert!(matches!(c.authorize("123456", Some("tok"), false, "tok"), Auth::Denied));
+        assert!(matches!(c.authorize("", None, false, ""), Auth::Denied)); // sync off => empty PIN never matches
+    }
+
+    #[test]
+    fn lan_pin_guessing_is_locked_out() {
+        let c = test_core();
+        for _ in 0..10 {
+            assert!(matches!(c.authorize("123456", None, false, "000000"), Auth::Denied));
+        }
+        assert!(matches!(c.authorize("123456", None, false, "123456"), Auth::Locked)); // even the right PIN waits
+    }
+
+    #[test]
+    #[ignore = "downloads ~55 MB from GitHub; run with --ignored"]
+    fn downloads_and_verifies_real_cloudflared() {
+        let dir = std::env::temp_dir().join("moneypi-cloudflared-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("cloudflared.exe");
+        download_cloudflared(&dest).unwrap();
+        let out = Command::new(&dest).arg("--version").output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("cloudflared version"));
+        assert!(!dest.with_extension("exe.part").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -299,3 +299,10 @@ label.chk.sm:hover{background:rgba(47,107,255,.07)}
 .field-err::before{content:"●";font-size:8px;margin-right:5px;vertical-align:1px}
 input.invalid{border-color:var(--neg)!important;box-shadow:0 0 0 3px rgba(224,52,74,.16)!important;animation:shake .45s cubic-bezier(.36,.07,.19,.97)}
 @keyframes shake{0%,100%{transform:translateX(0)}18%{transform:translateX(-7px) scale(1.01,.99)}36%{transform:translateX(6px)}54%{transform:translateX(-4px)}72%{transform:translateX(2px)}}
+
+/* ---------- remote tunnel ---------- */
+#ph-tabs{margin:14px 0 4px}
+#ph-tabs button{font-size:13px;padding:4px 10px}
+#rm-body{display:grid;gap:10px;margin-top:10px}
+#rm-body .conn{margin-top:0}
+#rm-body button.primary,#rm-body button.danger{justify-self:start}

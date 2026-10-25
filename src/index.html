@@ -254,6 +254,8 @@
 <dialog id="phdlg" class="glass">
   <form method="dialog" id="phform">
     <h3>手機連線</h3>
+    <div class="seg" id="ph-tabs"><button type="button" data-t="lan" class="on">區域網路（同一個 Wi-Fi）</button><button type="button" data-t="remote">遠端（不限網路）</button></div>
+    <div id="ph-lan">
     <p class="muted">讓手機、平板在同一個 Wi-Fi 下，用瀏覽器開啟 MoneyPi。資料仍存在這台電腦，兩邊即時同步。</p>
     <label class="chk"><input id="sync-on" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>啟用手機連線</span></label>
     <div class="two">
@@ -280,8 +282,13 @@
         <li>iPhone：用 Safari 開啟後，按分享 → 加入主畫面，就像 App 一樣使用。Android：Chrome 選單 → 加到主畫面。</li>
       </ol>
     </div>
+    </div>
+    <div id="ph-remote" hidden>
+      <p class="muted">用 Cloudflare 臨時隧道，讓手機在外面用行動數據也能連回這台電腦，不需要同一個 Wi-Fi。</p>
+      <div id="rm-body"></div>
+    </div>
     <p id="pherr" class="neg"></p>
-    <menu><button type="button" data-close>關閉</button><button type="submit" class="primary">套用</button></menu>
+    <menu><button type="button" data-close>關閉</button><button type="submit" class="primary" id="ph-apply">套用</button></menu>
   </form>
 </dialog>
 
