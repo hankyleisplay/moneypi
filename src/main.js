@@ -38,7 +38,7 @@ async function invoke(cmd, args = {}) {
       throw "無法連線到電腦，請確認在同一個 Wi-Fi 且電腦上的 MoneyPi 正在執行";
     }
     if (r.status === 401) {
-      token = await askPin(token ? "PIN 或連線密鑰錯誤。若是遠端連線，請回電腦重新掃描 QR Code" : "");
+      token = await askPin(token ? (viaTunnel ? "連線密鑰錯誤或已失效。每次重新開啟遠端連線都會換新密鑰，請回電腦重新掃描 QR Code。" : "PIN 錯誤，請重新輸入") : "");
       store.set("token", token);
       continue;
     }
@@ -48,13 +48,21 @@ async function invoke(cmd, args = {}) {
   }
 }
 
+const viaTunnel = location.hostname.endsWith(".trycloudflare.com");
+// accepts a bare PIN/secret or a whole pasted sign-in link
+const extractToken = (s) => { const m = s.match(/(?:\/t\/|#pin=)([0-9a-f]{32})/i); return (m ? m[1] : s).trim(); };
+
 function askPin(msg) {
   const d = $("pdlg");
-  if (msg) $("perr").textContent = msg;
+  $("pform").querySelector("h3").textContent = viaTunnel ? "輸入連線密鑰" : "輸入同步 PIN";
+  $("perr").textContent = msg || (viaTunnel
+    ? "這是遠端連線，需要連線密鑰（不是區域網路 PIN）。請在電腦的「手機連線 → 遠端」掃描 QR Code，或按「複製連結」傳到手機開啟；也可以把整條連結貼在這裡。"
+    : "請輸入電腦上 MoneyPi「手機連線」裡顯示的 PIN。");
   $("pform").pin.value = "";
+  $("pform").pin.placeholder = viaTunnel ? "貼上連結或密鑰" : "PIN";
   d.oncancel = (e) => e.preventDefault();
   return new Promise((res) => {
-    d.addEventListener("close", () => res($("pform").pin.value.trim()), { once: true });
+    d.addEventListener("close", () => res(extractToken($("pform").pin.value)), { once: true });
     if (!d.open) d.showModal();
   });
 }
@@ -1259,7 +1267,21 @@ function setPhTab(t) {
 $("ph-tabs").onclick = (e) => { const b = e.target.closest("button"); if (b) setPhTab(b.dataset.t); };
 
 const INSTALL_NOTE = "需要 Cloudflare 的 cloudflared 工具（約 55 MB）。只從官方發布頁下載，並核對官方公布的校驗碼，通過才會安裝；安裝在 MoneyPi 自己的資料夾，不需要系統管理員權限。";
+let tunnelLink = "";
+async function copyText(t) {
+  try {
+    // writeText can wait forever when the window has no focus, so give it a deadline
+    const ok = await Promise.race([navigator.clipboard.writeText(t).then(() => true), new Promise((r) => setTimeout(() => r(false), 1500))]);
+    if (ok) return true;
+  } catch {}
+  const ta = Object.assign(document.createElement("textarea"), { value: t });
+  document.body.appendChild(ta); ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  return ok;
+}
 function renderTunnel(s, busy = "") {
+  tunnelLink = s.link || "";
   $("phone-btn").classList.toggle("live-tunnel", !!s.running);
   $("phone-btn").classList.toggle("live", !!s.running || $("phone-btn").classList.contains("live-lan"));
   const b = $("rm-body");
@@ -1272,10 +1294,10 @@ function renderTunnel(s, busy = "") {
   } else {
     b.innerHTML = `<p class="hint pos">● 遠端連線已開啟</p>
       <div class="conn"><div class="qr">${s.qr || ""}</div><div class="conn-t">
-        <p class="muted">用手機相機掃描 QR Code（行動數據即可）：</p>
+        <p class="muted">用手機相機掃描 QR Code（行動數據即可）。</p>
         <div class="url">${esc(s.url)}</div>
-        <p class="hint">QR Code 內含這次連線專用的密鑰，請勿分享給別人。</p></div></div>
-      <button type="button" class="danger" id="rm-stop">關閉遠端連線</button>`;
+        <p class="hint">只輸入上面的網址<b>不能</b>連線，因為少了密鑰。請掃描 QR Code，或按「複製連結」傳給自己（例如 LINE 記事本）再用手機開啟。連結內含這次連線專用的密鑰，請勿分享給別人。</p></div></div>
+      <div class="btnrow"><button type="button" id="rm-copy">複製連結</button><button type="button" class="danger" id="rm-stop">關閉遠端連線</button></div>`;
   }
 }
 async function refreshTunnel() {
@@ -1303,6 +1325,7 @@ $("rm-body").onclick = async (e) => {
       renderTunnel({}, "正在建立遠端連線（約數秒）…");
       renderTunnel(await invoke("tunnel_start"));
     } else if (id === "rm-stop") renderTunnel(await invoke("tunnel_stop"));
+    else if (id === "rm-copy") toast((await copyText(tunnelLink)) ? "已複製連結（含密鑰，請勿分享）" : "複製失敗，請改用 QR Code");
   } catch (err) {
     $("pherr").textContent = String(err);
     refreshTunnel();

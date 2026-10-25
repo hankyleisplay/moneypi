@@ -912,7 +912,7 @@ impl Core {
             *t = None; // cloudflared exited on its own
         }
         let (running, url, link) = match &*t {
-            Some(x) => (true, Some(x.url.clone()), Some(format!("{}/#pin={}", x.url, x.token))),
+            Some(x) => (true, Some(x.url.clone()), Some(format!("{}/t/{}", x.url, x.token))),
             None => (false, None, None),
         };
         let qr = link.as_deref().and_then(qr_svg);
@@ -1188,6 +1188,31 @@ fn handle_http(core: Arc<Core>, mut req: tiny_http::Request) {
     };
 
     if *req.method() == Method::Get {
+        // Tunnel sign-in link: /t/<secret> stores the secret in the browser, then opens the app.
+        if let Some(tok) = url.strip_prefix("/t/") {
+            let via = header(&req, "Cf-Connecting-Ip").is_some() || header(&req, "Cf-Ray").is_some();
+            let expected = core.tunnel.lock().unwrap().as_ref().map(|t| t.token.clone());
+            if via && expected.as_deref().is_some_and(|e| check_secret(e, tok)) {
+                // `tok` equals the (hex) secret here, so it is safe to embed
+                let page = format!(
+                    "<!doctype html><meta charset=utf-8><title>MoneyPi</title><script>try{{localStorage.setItem('token','{tok}')}}catch(e){{}}location.replace('/')</script>"
+                );
+                let _ = req.respond(
+                    Response::from_string(page)
+                        .with_header(hdr("Content-Type", "text/html; charset=utf-8"))
+                        .with_header(hdr("Cache-Control", "no-store"))
+                        .with_header(hdr("Referrer-Policy", "no-referrer")),
+                );
+            } else {
+                thread::sleep(Duration::from_secs(1));
+                let _ = req.respond(
+                    Response::from_string("連結已失效，請回電腦重新掃描 QR Code")
+                        .with_status_code(404)
+                        .with_header(hdr("Content-Type", "text/plain; charset=utf-8")),
+                );
+            }
+            return;
+        }
         let _ = match url.as_str() {
             "/" | "/index.html" => req.respond(static_page(INDEX_HTML.as_bytes(), "text/html; charset=utf-8")),
             "/style.css" => req.respond(static_page(STYLE_CSS.as_bytes(), "text/css; charset=utf-8")),

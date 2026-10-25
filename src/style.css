@@ -306,3 +306,5 @@ input.invalid{border-color:var(--neg)!important;box-shadow:0 0 0 3px rgba(224,52
 #rm-body{display:grid;gap:10px;margin-top:10px}
 #rm-body .conn{margin-top:0}
 #rm-body button.primary,#rm-body button.danger{justify-self:start}
+
+.btnrow{display:flex;gap:10px;flex-wrap:wrap}

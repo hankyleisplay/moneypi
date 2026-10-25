@@ -1928,7 +1928,7 @@ dependencies = [
 
 [[package]]
 name = "moneypi"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "chrono",
  "getrandom 0.2.17",
