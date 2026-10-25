@@ -1259,6 +1259,55 @@ $("phform").onsubmit = async (e) => {
   }
 };
 
+/* ---------- custom form validation (replaces the browser's native "please fill out" bubble) ---------- */
+document.querySelectorAll("form").forEach((f) => (f.noValidate = true));
+
+function fieldName(el) {
+  const lab = el.closest("label");
+  const text = lab
+    ? [...lab.childNodes].filter((n) => n.nodeType === 3 || (n.nodeType === 1 && n.tagName === "SPAN" && !n.classList.contains("box"))).map((n) => n.textContent).join("")
+    : el.placeholder || "";
+  return text.replace(/（.*?）|\(.*?\)/g, "").trim() || "此欄位";
+}
+function problem(el) {
+  const v = el.validity;
+  if (v.valid) return "";
+  const n = fieldName(el);
+  if (v.valueMissing) return `請填寫「${n}」`;
+  if (v.rangeUnderflow) return `「${n}」不可小於 ${el.min}`;
+  if (v.rangeOverflow) return `「${n}」不可大於 ${el.max}`;
+  if (v.badInput) return `「${n}」請輸入數字`;
+  return `「${n}」格式不正確`;
+}
+function clearInvalid(form) {
+  form.querySelectorAll(".field-err").forEach((x) => x.remove());
+  form.querySelectorAll(".invalid").forEach((x) => x.classList.remove("invalid"));
+}
+// capture phase: runs before each form's own submit handler, and stops it when something is wrong
+document.addEventListener("submit", (e) => {
+  const form = e.target;
+  clearInvalid(form);
+  for (const el of form.querySelectorAll("input, textarea")) {
+    if (el.disabled || el.closest("[hidden]") || el.type === "checkbox" || el.type === "file") continue;
+    const msg = problem(el);
+    if (!msg) continue;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    el.classList.add("invalid");
+    const m = document.createElement("div");
+    m.className = "field-err";
+    m.textContent = msg;
+    (el.closest("label") || el.parentElement).appendChild(m);
+    el.focus();
+    return;
+  }
+}, true);
+document.addEventListener("input", (e) => {
+  if (!e.target.classList || !e.target.classList.contains("invalid")) return;
+  e.target.classList.remove("invalid");
+  (e.target.closest("label") || e.target.parentElement).querySelector(".field-err")?.remove();
+});
+
 /* ---------- boot ---------- */
 document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !inTauri));
 invoke("get_data")

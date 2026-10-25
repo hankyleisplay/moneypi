@@ -293,3 +293,9 @@ label.chk.sm:hover{background:rgba(47,107,255,.07)}
   .qr{width:100%;max-width:220px;height:auto;aspect-ratio:1;margin:0 auto}
   dialog{width:min(96vw,430px);padding:18px}
 }
+
+/* ---------- inline validation ---------- */
+.field-err{margin-top:5px;font-size:12px;color:var(--neg);animation:shake .45s cubic-bezier(.36,.07,.19,.97)}
+.field-err::before{content:"●";font-size:8px;margin-right:5px;vertical-align:1px}
+input.invalid{border-color:var(--neg)!important;box-shadow:0 0 0 3px rgba(224,52,74,.16)!important;animation:shake .45s cubic-bezier(.36,.07,.19,.97)}
+@keyframes shake{0%,100%{transform:translateX(0)}18%{transform:translateX(-7px) scale(1.01,.99)}36%{transform:translateX(6px)}54%{transform:translateX(-4px)}72%{transform:translateX(2px)}}
