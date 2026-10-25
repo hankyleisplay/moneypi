@@ -46,6 +46,9 @@
     <header class="glass bar">
       <h2 id="title">總覽</h2>
       <div class="actions">
+        <button class="icon" id="refresh-btn" title="同步股價與匯率" aria-label="同步股價與匯率">
+          <svg viewBox="0 0 24 24" width="17" height="17"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
         <button class="icon" id="hide-btn" title="隱藏金額" aria-label="隱藏金額">
           <svg viewBox="0 0 24 24" width="17" height="17"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.9"/></svg>
         </button>
@@ -55,6 +58,13 @@
         <button id="settings-btn">設定</button>
       </div>
     </header>
+
+    <div id="update-bar" class="glass notice" hidden>
+      <span id="update-text"></span>
+      <span class="grow"></span>
+      <button id="update-later">稍後</button>
+      <button id="update-now" class="primary">立即更新</button>
+    </div>
 
     <div id="view-overview" class="view">
       <section class="cards">
@@ -67,6 +77,8 @@
           <small id="goal-text"></small>
         </div>
       </section>
+
+      <section class="glass panel" id="goal-panel"></section>
 
       <section class="charts">
         <div class="glass panel">
@@ -97,8 +109,23 @@
     <div class="field">類別<div class="dd" id="f-cat"></div></div>
     <div class="two">
       <div class="field">幣別<div class="dd" id="f-cur"></div></div>
-      <label>金額<input name="value" type="number" min="0" step="any" required></label>
+      <label id="value-wrap">金額<input name="value" type="number" min="0" step="any" required></label>
     </div>
+
+    <label class="chk"><input name="holding" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>持倉（股票／基金：數量 × 單價）</span></label>
+    <div id="holding-fields" hidden>
+      <div class="two">
+        <div class="field">行情來源<div class="dd" id="f-mkt"></div></div>
+        <label>代號<input name="symbol" placeholder="2330、AAPL…" autocomplete="off"></label>
+      </div>
+      <div class="two">
+        <label>數量／單位數<input name="quantity" type="number" min="0" step="any"></label>
+        <label>單價／淨值<input name="price" type="number" min="0" step="any"></label>
+      </div>
+      <label>總成本<input name="cost" type="number" min="0" step="any"></label>
+      <p class="hint" id="hold-hint"></p>
+    </div>
+
     <label class="chk"><input name="liability" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>這是負債（貸款、卡費…）</span></label>
     <label>備註<input name="note" autocomplete="off"></label>
     <p id="err" class="neg"></p>
@@ -106,18 +133,70 @@
   </form>
 </dialog>
 
+<dialog id="tdlg" class="glass">
+  <form method="dialog" id="tform">
+    <h3 id="tdlg-title">記錄交易</h3>
+    <div class="field">類型<div class="dd" id="t-kind"></div></div>
+    <label>日期<input name="date" placeholder="YYYY-MM-DD" required autocomplete="off"></label>
+    <div class="two">
+      <label id="t-units-wrap">單位數<input name="units" type="number" min="0" step="any"></label>
+      <label id="t-price-wrap"><span id="t-price-label">單價／淨值</span><input name="price" type="number" min="0" step="any" required></label>
+    </div>
+    <label id="t-fee-wrap">手續費<input name="fee" type="number" min="0" step="any" placeholder="0"></label>
+    <label>備註<input name="note" autocomplete="off"></label>
+    <p id="terr" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
+  </form>
+</dialog>
+
 <dialog id="sdlg" class="glass">
   <form method="dialog" id="sform">
     <h3>設定</h3>
-    <label>淨資產目標（TWD，0 = 不設定）<input name="goal" type="number" min="0" step="any"></label>
+
+    <h4>目標</h4>
+    <div class="two">
+      <label>淨資產目標（TWD）<input name="goal" type="number" min="0" step="any" placeholder="0 = 不設定"></label>
+      <label>目標日期（選填）<input name="goal_date" placeholder="YYYY-MM-DD" autocomplete="off"></label>
+    </div>
+
+    <h4>股價與匯率自動更新</h4>
+    <div class="seg" id="refresh-seg">
+      <button type="button" data-m="0">關閉</button><button type="button" data-m="5">5 分</button><button type="button" data-m="15">15 分</button><button type="button" data-m="30">30 分</button><button type="button" data-m="60">60 分</button>
+    </div>
+
     <h4>匯率（1 單位折合 TWD）</h4>
     <div id="rates"></div>
     <div class="two add-rate">
       <input id="new-code" placeholder="新增幣別，如 GBP" maxlength="5" autocomplete="off">
       <input id="new-rate" type="number" min="0" step="any" placeholder="匯率">
     </div>
+
+    <div class="desk-only" hidden>
+      <h4>區域網路同步（手機／其他電腦）</h4>
+      <label class="chk"><input id="sync-on" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>啟用（同一個 Wi-Fi 下用瀏覽器開啟）</span></label>
+      <div class="two">
+        <label>連接埠<input id="sync-port" type="number" min="1024" max="65535" step="1"></label>
+        <label>PIN（4–12 位數字）<input id="sync-pin" inputmode="numeric" autocomplete="off"></label>
+      </div>
+      <p class="hint" id="sync-info"></p>
+    </div>
+
+    <div class="desk-only" hidden>
+      <h4>版本</h4>
+      <div class="row"><span id="ver" class="muted"></span><button type="button" id="upd-btn">檢查更新</button></div>
+    </div>
+
     <p id="serr" class="neg"></p>
     <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
+  </form>
+</dialog>
+
+<dialog id="pdlg" class="glass small">
+  <form method="dialog" id="pform">
+    <h3>輸入同步 PIN</h3>
+    <p class="muted" id="perr">請輸入電腦上 MoneyPi「設定」裡顯示的 PIN。</p>
+    <input name="pin" inputmode="numeric" autocomplete="off" placeholder="PIN" required>
+    <menu><button type="submit" class="primary">連線</button></menu>
   </form>
 </dialog>
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MoneyPi",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.moneypi.app",
   "build": {
     "frontendDist": "../src"
@@ -9,13 +9,21 @@
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "title": "MoneyPi 資產追蹤", "width": 1000, "height": 720, "minWidth": 760, "minHeight": 560 }
+      { "title": "MoneyPi 資產追蹤", "width": 1100, "height": 760, "minWidth": 760, "minHeight": 560 }
     ],
     "security": { "csp": null }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZDMzQ2NTZFOTYxNUZGMDUKUldRRi94V1dibVUwYkVyc25TOXg0bVJROFNSV3c0L2k5VlJpQ29uZS92clVLa2JRclF5MFI2R2sK",
+      "endpoints": ["https://github.com/hankyleisplay/moneypi/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
   }
 }
