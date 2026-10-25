@@ -7,32 +7,75 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <h1>MoneyPi</h1>
-  <button id="add-btn" class="primary">＋ 新增項目</button>
+<div class="orbs" aria-hidden="true"><i></i><i></i><i></i></div>
+
+<main>
+<header class="glass bar">
+  <div class="brand"><span class="logo">π</span><h1>MoneyPi</h1></div>
+  <div class="actions">
+    <button class="icon" id="hide-btn" title="隱藏金額">👁</button>
+    <button class="icon" id="theme-btn" title="切換主題">◐</button>
+    <button id="export-btn">匯出</button>
+    <button id="import-btn">匯入</button>
+    <input type="file" id="import-file" accept=".csv,text/csv" hidden>
+    <button id="settings-btn">設定</button>
+    <button id="add-btn" class="primary">＋ 新增</button>
+  </div>
 </header>
 
 <section class="cards">
-  <div class="card"><span>淨資產</span><strong id="net">-</strong><small id="net-delta"></small></div>
-  <div class="card"><span>總資產</span><strong id="assets">-</strong></div>
-  <div class="card"><span>總負債</span><strong id="liab" class="neg">-</strong></div>
+  <div class="glass card hero"><span>淨資產</span><strong id="net">-</strong><small id="net-delta"></small></div>
+  <div class="glass card"><span>總資產</span><strong id="assets">-</strong></div>
+  <div class="glass card"><span>總負債</span><strong id="liab" class="neg">-</strong><small id="debt-ratio"></small></div>
+  <div class="glass card goal">
+    <span>目標進度</span><strong id="goal-pct">-</strong>
+    <div class="progress"><div id="goal-bar"></div></div>
+    <small id="goal-text"></small>
+  </div>
 </section>
 
 <section class="charts">
-  <div class="panel"><h2>淨資產走勢</h2><canvas id="trend" width="560" height="220"></canvas></div>
-  <div class="panel"><h2>資產配置</h2><canvas id="alloc" width="300" height="220"></canvas><ul id="legend"></ul></div>
+  <div class="glass panel">
+    <div class="panel-head">
+      <h2>淨資產走勢</h2>
+      <div class="seg" id="range">
+        <button data-r="30">1月</button><button data-r="90">3月</button><button data-r="365">1年</button><button data-r="0" class="on">全部</button>
+      </div>
+    </div>
+    <canvas id="trend"></canvas>
+  </div>
+  <div class="glass panel">
+    <h2>資產配置</h2>
+    <canvas id="alloc"></canvas>
+    <ul id="legend"></ul>
+  </div>
 </section>
 
-<section class="panel">
-  <h2>項目明細</h2>
+<section class="glass panel">
+  <div class="panel-head wrap">
+    <h2>項目明細 <span class="muted" id="count"></span></h2>
+    <div class="tools">
+      <div class="seg" id="kind">
+        <button data-k="all" class="on">全部</button><button data-k="asset">資產</button><button data-k="liab">負債</button>
+      </div>
+      <select id="cat"><option value="">所有類別</option></select>
+      <select id="sort">
+        <option value="value">金額高→低</option><option value="name">名稱</option><option value="updated">最近更新</option>
+      </select>
+      <input id="q" type="search" placeholder="搜尋…">
+    </div>
+  </div>
+  <div class="scroll">
   <table>
-    <thead><tr><th>名稱</th><th>類別</th><th class="r">金額</th><th>更新</th><th></th></tr></thead>
+    <thead><tr><th>名稱</th><th>類別</th><th class="r">金額</th><th class="r">折合 TWD</th><th>更新</th><th></th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
-  <p id="empty" class="muted" hidden>尚無項目，按右上角「新增項目」開始記錄。</p>
+  </div>
+  <p id="empty" class="muted" hidden></p>
 </section>
+</main>
 
-<dialog id="dlg">
+<dialog id="dlg" class="glass">
   <form method="dialog" id="form">
     <h3 id="dlg-title">新增項目</h3>
     <label>名稱<input name="name" required></label>
@@ -42,16 +85,33 @@
         <option>加密貨幣</option><option>不動產</option><option>保險</option><option>其他</option>
       </select>
     </label>
-    <label>金額<input name="value" type="number" min="0" step="any" required></label>
+    <div class="two">
+      <label>幣別<select name="currency"></select></label>
+      <label>金額<input name="value" type="number" min="0" step="any" required></label>
+    </div>
     <label class="inline"><input name="liability" type="checkbox"> 這是負債（貸款、卡費…）</label>
     <label>備註<input name="note"></label>
     <p id="err" class="neg"></p>
-    <menu>
-      <button type="button" id="cancel">取消</button>
-      <button type="submit" class="primary">儲存</button>
-    </menu>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
   </form>
 </dialog>
+
+<dialog id="sdlg" class="glass">
+  <form method="dialog" id="sform">
+    <h3>設定</h3>
+    <label>淨資產目標（TWD，0 = 不設定）<input name="goal" type="number" min="0" step="any"></label>
+    <h4>匯率（1 單位折合 TWD）</h4>
+    <div id="rates"></div>
+    <div class="two add-rate">
+      <input id="new-code" placeholder="新增幣別，如 GBP" maxlength="5">
+      <input id="new-rate" type="number" min="0" step="any" placeholder="匯率">
+    </div>
+    <p id="serr" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
+  </form>
+</dialog>
+
+<div id="toast" class="glass" hidden></div>
 <script src="main.js"></script>
 </body>
 </html>
