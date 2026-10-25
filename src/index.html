@@ -2,7 +2,15 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="MoneyPi">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>MoneyPi 資產追蹤</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -51,6 +59,9 @@
     <header class="glass bar">
       <h2 id="title">總覽</h2>
       <div class="actions">
+        <button class="icon desk-only" id="phone-btn" title="手機連線" aria-label="手機連線" hidden>
+          <svg viewBox="0 0 24 24" width="17" height="17"><rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M11 18.5h2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+        </button>
         <button class="icon" id="refresh-btn" title="同步股價與匯率" aria-label="同步股價與匯率">
           <svg viewBox="0 0 24 24" width="17" height="17"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -77,7 +88,7 @@
         <div class="glass card"><span>總資產</span><strong id="assets">-</strong></div>
         <div class="glass card"><span>總負債</span><strong id="liab" class="neg">-</strong><small id="debt-ratio"></small></div>
         <div class="glass card goal">
-          <span>目標進度</span><strong id="goal-pct">-</strong>
+          <span id="goal-label">目標進度</span><strong id="goal-pct">-</strong>
           <div class="progress"><div id="goal-bar"></div></div>
           <small id="goal-text"></small>
         </div>
@@ -192,12 +203,6 @@
   <form method="dialog" id="sform">
     <h3>設定</h3>
 
-    <h4>目標</h4>
-    <div class="two">
-      <label>淨資產目標（TWD）<input name="goal" type="number" min="0" step="any" placeholder="0 = 不設定"></label>
-      <label>目標日期（選填）<input name="goal_date" placeholder="YYYY-MM-DD" autocomplete="off"></label>
-    </div>
-
     <h4>股價與匯率自動更新</h4>
     <div class="seg" id="refresh-seg">
       <button type="button" data-m="0">關閉</button><button type="button" data-m="5">5 分</button><button type="button" data-m="15">15 分</button><button type="button" data-m="30">30 分</button><button type="button" data-m="60">60 分</button>
@@ -208,16 +213,6 @@
     <div class="two add-rate">
       <input id="new-code" placeholder="新增幣別，如 GBP" maxlength="5" autocomplete="off">
       <input id="new-rate" type="number" min="0" step="any" placeholder="匯率">
-    </div>
-
-    <div class="desk-only" hidden>
-      <h4>區域網路同步（手機／其他電腦）</h4>
-      <label class="chk"><input id="sync-on" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>啟用（同一個 Wi-Fi 下用瀏覽器開啟）</span></label>
-      <div class="two">
-        <label>連接埠<input id="sync-port" type="number" min="1024" max="65535" step="1"></label>
-        <label>PIN（4–12 位數字）<input id="sync-pin" inputmode="numeric" autocomplete="off"></label>
-      </div>
-      <p class="hint" id="sync-info"></p>
     </div>
 
     <div class="desk-only" hidden>
@@ -232,6 +227,61 @@
 
     <p id="serr" class="neg"></p>
     <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
+  </form>
+</dialog>
+
+<dialog id="gdlg" class="glass">
+  <form method="dialog" id="gform">
+    <h3 id="gdlg-title">新增目標</h3>
+    <div class="two">
+      <div class="field">圖示<div class="dd" id="g-icon"></div></div>
+      <label>名稱<input name="name" required placeholder="財富自由、買跑車…" autocomplete="off"></label>
+    </div>
+    <div class="two">
+      <label>目標金額（TWD）<input name="amount" type="number" min="0" step="any" required></label>
+      <label>目標日期（選填）<input name="date" placeholder="YYYY-MM-DD" autocomplete="off"></label>
+    </div>
+    <div class="field">計算基準
+      <div class="seg" id="g-basis"><button type="button" data-b="net" class="on">全部淨資產</button><button type="button" data-b="pick">指定項目</button></div>
+    </div>
+    <div id="g-assets" class="checks" hidden></div>
+    <p class="hint" id="g-hint"></p>
+    <p id="gerr" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
+  </form>
+</dialog>
+
+<dialog id="phdlg" class="glass">
+  <form method="dialog" id="phform">
+    <h3>手機連線</h3>
+    <p class="muted">讓手機、平板在同一個 Wi-Fi 下，用瀏覽器開啟 MoneyPi。資料仍存在這台電腦，兩邊即時同步。</p>
+    <label class="chk"><input id="sync-on" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>啟用手機連線</span></label>
+    <div class="two">
+      <label>PIN（4–12 位數字）<input id="sync-pin" inputmode="numeric" autocomplete="off" placeholder="留空自動產生"></label>
+      <label>連接埠<input id="sync-port" type="number" min="1024" max="65535" step="1"></label>
+    </div>
+    <p class="hint" id="ph-status"></p>
+    <div id="ph-conn" class="conn" hidden>
+      <div id="ph-qr" class="qr"></div>
+      <div class="conn-t">
+        <p class="muted">用手機相機掃描 QR Code 即可連線；或在手機瀏覽器輸入：</p>
+        <div id="ph-urls"></div>
+        <p class="hint">連線為區網 HTTP（未加密），請只在可信任的網路使用。</p>
+      </div>
+    </div>
+    <button type="button" class="link" id="ph-tips-btn">連不上？看這裡</button>
+    <div id="ph-tips" class="tips" hidden>
+      <ol>
+        <li>手機與電腦要連<b>同一個 Wi-Fi</b>（不是訪客網路，也不是行動數據）。</li>
+        <li>電腦上的 MoneyPi 要保持開啟。</li>
+        <li>第一次啟用時 Windows 防火牆會詢問，請按「允許」。若曾按過取消，到「Windows 安全性 → 防火牆 → 允許應用程式通過防火牆」勾選 MoneyPi。</li>
+        <li>部分路由器開啟「AP 隔離」會擋住裝置互連，請在路由器關閉。</li>
+        <li>有多個網路位址時，請試試上面列出的每一個。</li>
+        <li>iPhone：用 Safari 開啟後，按分享 → 加入主畫面，就像 App 一樣使用。Android：Chrome 選單 → 加到主畫面。</li>
+      </ol>
+    </div>
+    <p id="pherr" class="neg"></p>
+    <menu><button type="button" data-close>關閉</button><button type="submit" class="primary">套用</button></menu>
   </form>
 </dialog>
 

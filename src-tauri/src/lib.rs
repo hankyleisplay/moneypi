@@ -19,6 +19,9 @@ const DEFAULT_PORT: u16 = 8787;
 const INDEX_HTML: &str = include_str!("../../src/index.html");
 const STYLE_CSS: &str = include_str!("../../src/style.css");
 const MAIN_JS: &str = include_str!("../../src/main.js");
+const MANIFEST: &str = include_str!("../../src/manifest.webmanifest");
+const ICON_192: &[u8] = include_bytes!("../../src/icon-192.png");
+const ICON_512: &[u8] = include_bytes!("../../src/icon-512.png");
 
 // ---------------------------------------------------------------- data model
 
@@ -77,6 +80,31 @@ struct Asset {
     txs: Vec<Tx>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct GoalPoint {
+    date: String,
+    value: f64,
+}
+
+/// A savings / wealth goal. Progress is measured on total net worth, or on a chosen set of assets.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Goal {
+    #[serde(default)]
+    id: u64,
+    name: String,
+    #[serde(default)]
+    icon: String,
+    amount: f64,
+    #[serde(default)]
+    date: String,
+    /// Asset ids that count toward this goal; empty = total net worth.
+    #[serde(default)]
+    assets: Vec<u64>,
+    /// Daily progress values (TWD), used for the "when will I get there" estimate.
+    #[serde(default)]
+    history: Vec<GoalPoint>,
+}
+
 /// One income/expense entry of the bookkeeping ledger (always TWD).
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Flow {
@@ -106,10 +134,15 @@ struct Data {
     snapshots: Vec<Snapshot>,
     #[serde(default = "default_rates")]
     rates: BTreeMap<String, f64>,
-    #[serde(default)]
+    /// Legacy single goal (pre-0.5); migrated into `goals` on load and never written back.
+    #[serde(default, skip_serializing)]
     goal: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     goal_date: String,
+    #[serde(default)]
+    goals: Vec<Goal>,
+    #[serde(default)]
+    next_goal: u64,
     /// Auto quote refresh interval in minutes (0 = off); the frontend drives the timer.
     #[serde(default)]
     refresh_min: u32,
@@ -134,6 +167,8 @@ impl Default for Data {
             rates: default_rates(),
             goal: 0.0,
             goal_date: String::new(),
+            goals: vec![],
+            next_goal: 0,
             refresh_min: 0,
             sync_enabled: false,
             sync_port: DEFAULT_PORT,
@@ -159,6 +194,37 @@ fn default_rates() -> BTreeMap<String, f64> {
 
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+fn net_history(d: &Data) -> Vec<GoalPoint> {
+    d.snapshots.iter().map(|s| GoalPoint { date: s.date.clone(), value: s.assets - s.liabilities }).collect()
+}
+
+/// Move the legacy single goal into the goals list.
+fn migrate(d: &mut Data) {
+    if d.goals.is_empty() && d.goal > 0.0 {
+        d.next_goal += 1;
+        let history = net_history(d);
+        d.goals.push(Goal {
+            id: d.next_goal,
+            name: "財富目標".into(),
+            icon: "🎯".into(),
+            amount: d.goal,
+            date: d.goal_date.clone(),
+            assets: vec![],
+            history,
+        });
+    }
+    d.goal = 0.0;
+    d.goal_date.clear();
+}
+
+fn goal_value(d: &Data, g: &Goal) -> f64 {
+    d.assets
+        .iter()
+        .filter(|a| g.assets.is_empty() || g.assets.contains(&a.id))
+        .map(|a| if a.liability { -in_base(d, a) } else { in_base(d, a) })
+        .sum()
 }
 
 fn valid_date(s: &str) -> bool {
@@ -301,12 +367,68 @@ impl Core {
             Some(last) if last.date == date => *last = snap,
             _ => d.snapshots.push(snap),
         }
+        let vals: Vec<f64> = d.goals.iter().map(|g| goal_value(d, g)).collect();
+        for (g, v) in d.goals.iter_mut().zip(vals) {
+            match g.history.last_mut() {
+                Some(p) if p.date == date => p.value = v,
+                _ => g.history.push(GoalPoint { date: date.clone(), value: v }),
+            }
+        }
         self.persist(d)
     }
 
     fn persist(&self, d: &Data) -> Result<(), String> {
         let json = serde_json::to_string_pretty(d).map_err(|e| e.to_string())?;
         fs::write(&self.path, json).map_err(|e| e.to_string())
+    }
+
+    fn save_goal(&self, mut g: Goal) -> Result<Value, String> {
+        g.name = g.name.trim().to_string();
+        if g.name.is_empty() {
+            return Err("目標名稱不可為空".into());
+        }
+        if !g.amount.is_finite() || g.amount <= 0.0 {
+            return Err("目標金額必須大於 0".into());
+        }
+        if !g.date.is_empty() && !valid_date(&g.date) {
+            return Err("目標日期格式需為 YYYY-MM-DD".into());
+        }
+        if g.icon.is_empty() {
+            g.icon = "🎯".into();
+        }
+        let mut d = self.data.lock().unwrap();
+        g.assets.retain(|id| d.assets.iter().any(|a| a.id == *id));
+        g.assets.sort_unstable();
+        g.assets.dedup();
+        if g.id == 0 {
+            if d.goals.len() >= 50 {
+                return Err("目標數量已達上限（50）".into());
+            }
+            d.next_goal += 1;
+            g.id = d.next_goal;
+            g.history = if g.assets.is_empty() { net_history(&d) } else { vec![] };
+            d.goals.push(g);
+        } else {
+            let i = d.goals.iter().position(|x| x.id == g.id).ok_or("找不到該目標")?;
+            // Changing what the goal measures invalidates its history.
+            g.history = if d.goals[i].assets == g.assets {
+                d.goals[i].history.clone()
+            } else if g.assets.is_empty() {
+                net_history(&d)
+            } else {
+                vec![]
+            };
+            d.goals[i] = g;
+        }
+        self.commit(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn delete_goal(&self, id: u64) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.goals.retain(|g| g.id != id);
+        self.persist(&d)?;
+        Ok(view(&d))
     }
 
     fn add_flow(&self, mut f: Flow) -> Result<Value, String> {
@@ -336,6 +458,7 @@ impl Core {
 
     fn import_backup(&self, text: &str) -> Result<Value, String> {
         let mut inc: Data = serde_json::from_str(text).map_err(|e| format!("備份檔格式錯誤：{e}"))?;
+        migrate(&mut inc);
         if inc.rates.get(BASE) != Some(&1.0) || inc.rates.values().any(|r| !r.is_finite() || *r <= 0.0) {
             return Err("備份檔的匯率資料不正確".into());
         }
@@ -352,6 +475,7 @@ impl Core {
         inc.sync_pin = d.sync_pin.clone();
         inc.next_id = inc.next_id.max(inc.assets.iter().map(|a| a.id).max().unwrap_or(0));
         inc.next_flow = inc.next_flow.max(inc.cashflow.iter().map(|f| f.id).max().unwrap_or(0));
+        inc.next_goal = inc.next_goal.max(inc.goals.iter().map(|g| g.id).max().unwrap_or(0));
         let _ = fs::copy(&self.path, self.path.with_extension("before-restore.json"));
         for a in inc.assets.iter_mut() {
             recompute(a);
@@ -439,8 +563,6 @@ impl Core {
     fn set_settings(
         &self,
         rates: BTreeMap<String, f64>,
-        goal: f64,
-        goal_date: String,
         refresh_min: u32,
     ) -> Result<Value, String> {
         if rates.get(BASE) != Some(&1.0) {
@@ -448,12 +570,6 @@ impl Core {
         }
         if rates.values().any(|r| !r.is_finite() || *r <= 0.0) {
             return Err("匯率必須為正數".into());
-        }
-        if !goal.is_finite() || goal < 0.0 {
-            return Err("目標金額必須為非負數".into());
-        }
-        if !goal_date.is_empty() && !valid_date(&goal_date) {
-            return Err("目標日期格式需為 YYYY-MM-DD".into());
         }
         if !matches!(refresh_min, 0 | 5 | 15 | 30 | 60) {
             return Err("不支援的更新間隔".into());
@@ -463,8 +579,6 @@ impl Core {
             return Err(format!("「{}」仍使用幣別 {}，無法移除", a.name, a.currency));
         }
         d.rates = rates;
-        d.goal = goal;
-        d.goal_date = goal_date;
         d.refresh_min = refresh_min;
         for a in d.assets.iter_mut() {
             recompute(a);
@@ -613,8 +727,14 @@ impl Core {
     fn sync_info(&self) -> Value {
         let d = self.data.lock().unwrap();
         let running = self.server.lock().unwrap().is_some();
-        let urls: Vec<String> = local_ip().map(|ip| vec![format!("http://{ip}:{}", d.sync_port)]).unwrap_or_default();
-        json!({ "enabled": d.sync_enabled, "running": running, "port": d.sync_port, "pin": d.sync_pin, "urls": urls })
+        let urls: Vec<String> = lan_ips().into_iter().map(|ip| format!("http://{ip}:{}", d.sync_port)).collect();
+        // One scan connects: the PIN rides in the URL fragment, which is never sent over the network.
+        let qr = if running && !d.sync_pin.is_empty() {
+            urls.first().and_then(|u| qr_svg(&format!("{u}/#pin={}", d.sync_pin)))
+        } else {
+            None
+        };
+        json!({ "enabled": d.sync_enabled, "running": running, "port": d.sync_port, "pin": d.sync_pin, "urls": urls, "qr": qr })
     }
 
     fn set_sync(self: &Arc<Self>, enabled: bool, port: u16, pin: String) -> Result<Value, String> {
@@ -760,12 +880,9 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "delete_asset" => core.delete_asset(arg(&args, "id")?),
         "add_tx" => core.add_tx(arg(&args, "id")?, arg(&args, "tx")?),
         "delete_tx" => core.delete_tx(arg(&args, "id")?, arg(&args, "index")?),
-        "set_settings" => core.set_settings(
-            arg(&args, "rates")?,
-            arg(&args, "goal")?,
-            arg(&args, "goal_date")?,
-            arg(&args, "refresh_min")?,
-        ),
+        "set_settings" => core.set_settings(arg(&args, "rates")?, arg(&args, "refresh_min")?),
+        "save_goal" => core.save_goal(arg(&args, "goal")?),
+        "delete_goal" => core.delete_goal(arg(&args, "id")?),
         "refresh_quotes" => core.refresh_quotes(),
         "export_csv" => Ok(Value::String(core.export_csv())),
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
@@ -798,15 +915,18 @@ fn handle_http(core: Arc<Core>, mut req: tiny_http::Request) {
     let url = req.url().split('?').next().unwrap_or("/").to_string();
     let hdr = |k: &str, v: &str| Header::from_bytes(k.as_bytes(), v.as_bytes()).unwrap();
 
-    let static_page = |body: &'static str, ctype: &str| {
-        Response::from_string(body).with_header(hdr("Content-Type", ctype)).with_header(hdr("Cache-Control", "no-cache"))
+    let static_page = |body: &'static [u8], ctype: &str| {
+        Response::from_data(body).with_header(hdr("Content-Type", ctype)).with_header(hdr("Cache-Control", "no-cache"))
     };
 
     if *req.method() == Method::Get {
         let _ = match url.as_str() {
-            "/" | "/index.html" => req.respond(static_page(INDEX_HTML, "text/html; charset=utf-8")),
-            "/style.css" => req.respond(static_page(STYLE_CSS, "text/css; charset=utf-8")),
-            "/main.js" => req.respond(static_page(MAIN_JS, "text/javascript; charset=utf-8")),
+            "/" | "/index.html" => req.respond(static_page(INDEX_HTML.as_bytes(), "text/html; charset=utf-8")),
+            "/style.css" => req.respond(static_page(STYLE_CSS.as_bytes(), "text/css; charset=utf-8")),
+            "/main.js" => req.respond(static_page(MAIN_JS.as_bytes(), "text/javascript; charset=utf-8")),
+            "/manifest.webmanifest" => req.respond(static_page(MANIFEST.as_bytes(), "application/manifest+json")),
+            "/icon-192.png" => req.respond(static_page(ICON_192, "image/png")),
+            "/icon-512.png" => req.respond(static_page(ICON_512, "image/png")),
             _ => req.respond(Response::from_string("not found").with_status_code(404)),
         };
         return;
@@ -841,6 +961,45 @@ fn handle_http(core: Arc<Core>, mut req: tiny_http::Request) {
         Ok(v) => reply(req, 200, v),
         Err(e) => reply(req, 400, json!({ "error": e })),
     }
+}
+
+fn qr_svg(text: &str) -> Option<String> {
+    use qrcode::render::svg;
+    let code = qrcode::QrCode::new(text.as_bytes()).ok()?;
+    let xml = code
+        .render::<svg::Color>()
+        .min_dimensions(180, 180)
+        .quiet_zone(true)
+        .dark_color(svg::Color("#1b2340"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    // drop the <?xml ...?> prolog so the markup can be inlined in HTML
+    xml.find("<svg").map(|i| xml[i..].to_string())
+}
+
+fn is_private_ip(ip: &str) -> bool {
+    ip.starts_with("192.168.")
+        || ip.starts_with("10.")
+        || (ip.starts_with("172.")
+            && ip.split('.').nth(1).and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (16..=31).contains(&n)))
+}
+
+/// Private IPv4 addresses of this machine, the default-route one first.
+fn lan_ips() -> Vec<String> {
+    let mut v: Vec<String> = local_ip().into_iter().collect();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if let Ok(o) = std::process::Command::new("ipconfig").creation_flags(0x0800_0000).output() {
+            for line in String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.contains("IPv4")) {
+                let ip: String = line.rsplit(':').next().unwrap_or("").chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+                if is_private_ip(&ip) && !v.contains(&ip) {
+                    v.push(ip);
+                }
+            }
+        }
+    }
+    v
 }
 
 fn local_ip() -> Option<String> {
@@ -891,6 +1050,8 @@ pub fn run() {
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default();
+            let mut data = data;
+            migrate(&mut data);
             let (enabled, port) = (data.sync_enabled, data.sync_port);
             let core = Arc::new(Core { path, data: Mutex::new(data), server: Mutex::new(None) });
             if enabled {
@@ -959,6 +1120,38 @@ mod tests {
         assert!(validate_flow(&Flow { kind: "x".into(), ..ok.clone() }).is_err());
         assert!(validate_flow(&Flow { date: "2026-13-40".into(), ..ok.clone() }).is_err());
         assert!(validate_flow(&Flow { category: String::new(), ..ok }).is_err());
+    }
+
+    #[test]
+    fn legacy_goal_is_migrated_once() {
+        let mut d: Data = serde_json::from_str(
+            r#"{"next_id":0,"assets":[],"snapshots":[{"date":"2026-01-01","assets":100.0,"liabilities":40.0}],"goal":500.0,"goal_date":"2030-01-01"}"#,
+        )
+        .unwrap();
+        migrate(&mut d);
+        migrate(&mut d);
+        assert_eq!(d.goals.len(), 1);
+        assert_eq!((d.goals[0].amount, d.goals[0].date.as_str()), (500.0, "2030-01-01"));
+        assert_eq!(d.goals[0].history[0].value, 60.0);
+        assert_eq!(d.goal, 0.0);
+        assert!(!serde_json::to_string(&d).unwrap().contains("\"goal\":"));
+    }
+
+    #[test]
+    fn goal_value_counts_selected_assets_and_subtracts_debt() {
+        let mut d = Data::default();
+        let mk = |id, v, liab| Asset { id, name: "x".into(), currency: "TWD".into(), value: v, liability: liab, ..Default::default() };
+        d.assets = vec![mk(1, 100.0, false), mk(2, 30.0, true), mk(3, 50.0, false)];
+        let all = Goal::default();
+        assert_eq!(goal_value(&d, &all), 120.0);
+        let some = Goal { assets: vec![1, 3], ..Default::default() };
+        assert_eq!(goal_value(&d, &some), 150.0);
+    }
+
+    #[test]
+    fn private_ip_filter() {
+        assert!(is_private_ip("192.168.1.5") && is_private_ip("10.0.0.2") && is_private_ip("172.20.1.1"));
+        assert!(!is_private_ip("172.32.0.1") && !is_private_ip("169.254.1.1") && !is_private_ip("8.8.8.8"));
     }
 
     #[test]

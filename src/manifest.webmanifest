@@ -1,0 +1,13 @@
+{
+  "name": "MoneyPi 資產追蹤",
+  "short_name": "MoneyPi",
+  "description": "資產、持倉、目標與記帳",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

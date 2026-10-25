@@ -18,6 +18,11 @@ const store = {
 /* ---------- backend access: Tauri IPC on the desktop, HTTP+PIN from a LAN browser ---------- */
 const inTauri = !!(window.__TAURI__ && window.__TAURI__.core);
 let token = store.get("token", "");
+if (!inTauri && location.hash.startsWith("#pin=")) {
+  token = decodeURIComponent(location.hash.slice(5));
+  store.set("token", token);
+  history.replaceState(null, "", location.pathname);
+}
 
 async function invoke(cmd, args = {}) {
   if (inTauri) return window.__TAURI__.core.invoke("call", { cmd, args });
@@ -54,7 +59,7 @@ function askPin(msg) {
   });
 }
 
-let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goal: 0, goal_date: "", refresh_min: 0, cashflow: [] };
+let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_min: 0, cashflow: [] };
 const ui = {
   kind: "all", cat: "", q: "", sort: "value", range: 0, sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
   hidden: store.get("hidden", "0") === "1",
@@ -197,14 +202,20 @@ side.style.transition = "none"; // no slide animation on first paint
 setCollapsed(store.get("collapsed", innerWidth < 760 ? "1" : "0") === "1");
 requestAnimationFrame(() => requestAnimationFrame(() => (side.style.transition = "")));
 $("collapse-btn").onclick = () => setCollapsed(!side.classList.contains("collapsed"));
+// phone: the expanded list floats over the page, so a tap anywhere else closes it
+document.addEventListener("click", (e) => {
+  if (innerWidth <= 640 && !side.classList.contains("collapsed") && !e.target.closest("#side, dialog")) setCollapsed(true);
+});
 $("hide-btn").onclick = () => {
   ui.hidden = !ui.hidden;
   store.set("hidden", ui.hidden ? "1" : "0");
   render();
 };
 
-/* ---------- goal projection ---------- */
+/* ---------- goals ---------- */
 const DAY = 864e5, MONTH_DAYS = 30.44;
+const GOAL_ICONS = ["🎯", "💰", "🏎️", "🏠", "✈️", "🎓", "💍", "🏖️", "🚗", "📱"];
+const CHECK_SVG = '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 function fmtDuration(days) {
   if (days < 45) return `約 ${Math.max(1, Math.ceil(days))} 天`;
@@ -214,9 +225,9 @@ function fmtDuration(days) {
 }
 const dateStr = (ms) => new Date(ms).toLocaleDateString("sv-SE");
 
-/** Least-squares trend of net worth over the last 180 days of snapshots → growth per day. */
-function projection() {
-  const pts = data.snapshots.map((s) => ({ t: Date.parse(s.date + "T00:00:00Z") / DAY, v: s.assets - s.liabilities }));
+/** Least-squares trend over the last 180 days of a goal's history → growth per day. */
+function projection(history) {
+  const pts = history.map((s) => ({ t: Date.parse(s.date + "T00:00:00Z") / DAY, v: s.value }));
   const lastT = pts.length ? pts[pts.length - 1].t : 0;
   const rec = pts.filter((p) => p.t >= lastT - 180);
   const span = rec.length ? rec[rec.length - 1].t - rec[0].t : 0;
@@ -229,49 +240,159 @@ function projection() {
   return out;
 }
 
-function renderGoalPanel(net) {
-  const el = $("goal-panel");
-  if (!(data.goal > 0)) {
-    el.innerHTML = `<div class="panel-head"><h3>目標預測</h3><button class="link" data-goal-edit>設定目標</button></div>
-      <p class="muted">設定淨資產目標後，會依你近期的資產成長速度，自動推算還要多久才能達成。</p>`;
-    return;
-  }
-  const p = projection(), goal = data.goal, left = goal - net;
-  let eta, etaSub = "";
-  if (left <= 0) eta = "🎉 已達成";
-  else if (p.slope === null) { eta = "資料不足"; etaSub = "需累積至少 3 天、2 筆以上的記錄"; }
-  else if (p.slope <= 0) { eta = "目前無法預估"; etaSub = "近期資產沒有成長"; }
+function goalVal(g) {
+  return data.assets
+    .filter((a) => !g.assets.length || g.assets.includes(a.id))
+    .reduce((s, a) => s + (a.liability ? -1 : 1) * toBase(a), 0);
+}
+
+function goalInfo(g) {
+  const cur = goalVal(g), left = g.amount - cur, p = projection(g.history);
+  const info = { cur, left, p, pct: Math.max(0, (cur / g.amount) * 100), done: left <= 0, eta: "", etaSub: "" };
+  if (info.done) info.eta = "🎉 已達成";
+  else if (p.slope === null) { info.eta = "資料不足"; info.etaSub = "需累積至少 3 天、2 筆以上的記錄"; }
+  else if (p.slope <= 0) { info.eta = "目前無法預估"; info.etaSub = "近期沒有成長"; }
   else {
     const days = left / p.slope;
-    eta = days / 365 > 100 ? "超過 100 年" : dateStr(Date.now() + days * DAY);
-    etaSub = fmtDuration(days);
+    info.eta = days / 365 > 100 ? "超過 100 年" : dateStr(Date.now() + days * DAY);
+    info.etaSub = fmtDuration(days);
   }
-  // [label, value, sub, masked?]
-  const tiles = [
-    ["目標", money(goal), "", true],
-    ["目前淨資產", money(net), left > 0 ? `還差 ${ui.hidden ? "••••" : fmt0.format(left)}` : "", true],
-    ["近期成長速度", p.slope === null ? "—" : `${ui.hidden ? "••••" : signed(p.monthly)} / 月`, p.slope === null ? "" : `依近 ${Math.round(p.span)} 天、${p.n} 筆記錄`, true],
-    ["預計達成", eta, etaSub, false],
-  ];
-  let tail = "";
-  if (data.goal_date) {
-    const monthsLeft = (Date.parse(data.goal_date + "T00:00:00") - Date.now()) / DAY / MONTH_DAYS;
-    if (left > 0 && monthsLeft <= 0) tiles.push(["目標日期", data.goal_date, "已逾期", false]);
-    else if (left > 0) {
-      const need = left / monthsLeft;
-      tiles.push(["目標日期", data.goal_date, `剩 ${fmtDuration(monthsLeft * MONTH_DAYS).replace("約 ", "")}`, false]);
-      tiles.push(["需每月成長", ui.hidden ? "••••" : fmt0.format(need), "", true]);
-      if (p.slope !== null) {
-        const ok = p.monthly >= need;
-        tail = `<div class="stat ${ok ? "up" : "down"}"><span>目前進度</span><b>${ok ? "超前" : "落後"}</b><small>${ui.hidden ? "" : `每月${ok ? "多" : "少"} ${fmt0.format(Math.abs(p.monthly - need))}`}</small></div>`;
-      }
-    } else tiles.push(["目標日期", data.goal_date, "", false]);
+  if (g.date && !info.done) {
+    const ml = (Date.parse(g.date + "T00:00:00") - Date.now()) / DAY / MONTH_DAYS;
+    if (ml <= 0) info.late = true;
+    else {
+      info.leftText = fmtDuration(ml * MONTH_DAYS).replace("約 ", "");
+      info.need = left / ml;
+      if (p.slope !== null) info.ahead = p.monthly >= info.need;
+    }
   }
-  el.innerHTML = `<div class="panel-head"><h3>目標預測</h3><button class="link" data-goal-edit>調整目標</button></div>
-    <div class="stats">${tiles.map(([k, v, s, m]) => `<div class="stat"><span>${k}</span><b class="${m ? mask() : ""}">${esc(v)}</b>${s ? `<small>${esc(s)}</small>` : ""}</div>`).join("")}${tail}</div>
-    <p class="note">以近 180 天淨資產記錄做線性趨勢估算（含股價漲跌），僅供參考。</p>`;
+  return info;
 }
-$("goal-panel").onclick = (e) => e.target.closest("[data-goal-edit]") && openSettings();
+
+function renderGoalHero() {
+  const gs = data.goals;
+  if (!gs.length) {
+    $("goal-label").textContent = "目標進度";
+    $("goal-pct").textContent = "—";
+    $("goal-bar").style.width = "0";
+    $("goal-text").textContent = "按下方「新增目標」開始";
+    return;
+  }
+  const infos = gs.map((g) => ({ g, i: goalInfo(g) }));
+  const open = infos.filter((x) => !x.i.done);
+  const pick = [...(open.length ? open : infos)].sort((a, b) => b.i.pct - a.i.pct)[0];
+  $("goal-label").textContent = `目標 · ${pick.g.icon} ${pick.g.name}`;
+  $("goal-pct").textContent = pick.i.pct.toFixed(1) + "%";
+  $("goal-bar").style.width = Math.min(100, pick.i.pct) + "%";
+  const done = infos.filter((x) => x.i.done).length;
+  $("goal-text").textContent = `${done}/${gs.length} 個已達成` + (!pick.i.done && !ui.hidden ? ` · 還差 ${fmt0.format(pick.i.left)}` : "");
+}
+
+function renderGoals() {
+  const el = $("goal-panel"), m = mask();
+  const head = `<div class="panel-head"><h3>目標</h3><button class="primary" data-gadd>＋ 新增目標</button></div>`;
+  if (!data.goals.length) {
+    el.innerHTML = head + '<p class="muted">還沒有目標。新增幾個，例如「財富自由」「買跑車」「出國旅行」，會依你的資產成長速度，自動估算還要多久達成。</p>';
+    return;
+  }
+  el.innerHTML = head + `<div class="goals">${data.goals.map((g) => {
+    const i = goalInfo(g);
+    const basis = g.assets.length
+      ? "指定 " + g.assets.map((id) => data.assets.find((a) => a.id === id)?.name).filter(Boolean).join("、")
+      : "全部淨資產";
+    const dl = g.date
+      ? `<div class="gline"><span>目標日</span><b>${esc(g.date)}</b>${
+          i.done ? "" : i.late ? '<small class="neg">已逾期</small>'
+          : `<small>剩 ${esc(i.leftText)}${ui.hidden ? "" : ` · 需每月 ${fmt0.format(i.need)}`}${i.ahead === undefined ? "" : i.ahead ? ' · <span class="pos">超前</span>' : ' · <span class="neg">落後</span>'}</small>`}</div>`
+      : "";
+    return `<div class="gcard ${i.done ? "done" : ""}" data-gid="${g.id}">
+      <div class="ghead"><span class="gicon">${esc(g.icon)}</span>
+        <div class="gname"><b>${esc(g.name)}</b><small title="${esc(basis)}">${esc(basis)}</small></div>
+        <div class="gbtns"><button class="link" data-gedit>編輯</button><button class="link danger" data-gdel>刪除</button></div></div>
+      <div class="gamt"><b class="${m}">${money(i.cur)}</b><span class="muted ${m}"> / ${money(g.amount)}</span><span class="gpct">${i.pct.toFixed(1)}%</span></div>
+      <div class="progress"><div data-w="${Math.min(100, i.pct)}%"></div></div>
+      <div class="gline"><span>預計達成</span><b>${esc(i.eta)}</b>${i.etaSub ? `<small>${esc(i.etaSub)}</small>` : ""}</div>
+      ${dl}
+    </div>`;
+  }).join("")}</div>
+  <p class="note">預估依各目標近 180 天的進度記錄做線性趨勢（含股價漲跌），僅供參考。</p>`;
+  // let the bars animate from 0
+  requestAnimationFrame(() => requestAnimationFrame(() => el.querySelectorAll(".progress div[data-w]").forEach((d) => (d.style.width = d.dataset.w))));
+}
+
+const gdlg = $("gdlg"), gform = $("gform"), gIcon = new Dropdown($("g-icon"));
+gIcon.setOptions(GOAL_ICONS.map((e) => ({ value: e, label: e })), "🎯");
+let editingGoal = 0, gBasis = "net";
+const gPicked = new Set();
+
+function renderGoalAssets() {
+  $("g-assets").innerHTML = data.assets.length
+    ? data.assets.map((a) => `<label class="chk sm"><input type="checkbox" data-aid="${a.id}" ${gPicked.has(a.id) ? "checked" : ""}><span class="box">${CHECK_SVG}</span>
+        <span>${esc(a.name)} <small class="muted">${a.liability ? "負債 · " : ""}${esc(a.category)}</small></span></label>`).join("")
+    : '<p class="muted">還沒有任何項目，請先新增資產。</p>';
+}
+function setGoalBasis(b) {
+  gBasis = b;
+  [...$("g-basis").children].forEach((x) => x.classList.toggle("on", x.dataset.b === b));
+  $("g-assets").hidden = b !== "pick";
+  $("g-hint").textContent = b === "pick"
+    ? "只計入勾選的項目（負債會扣除），例如把「跑車基金」專用帳戶設為這個目標的基準。"
+    : "以全部資產扣掉負債後的淨資產計算進度。";
+  if (b === "pick") renderGoalAssets();
+}
+$("g-basis").onclick = (e) => { const b = e.target.closest("button"); if (b) setGoalBasis(b.dataset.b); };
+$("g-assets").onchange = (e) => {
+  const id = Number(e.target.dataset.aid);
+  e.target.checked ? gPicked.add(id) : gPicked.delete(id);
+};
+
+function openGoal(g) {
+  editingGoal = g ? g.id : 0;
+  $("gdlg-title").textContent = g ? "編輯目標" : "新增目標";
+  gform.reset();
+  $("gerr").textContent = "";
+  gIcon.setValue(g ? g.icon : "🎯");
+  gPicked.clear();
+  if (g) {
+    gform.name.value = g.name;
+    gform.amount.value = g.amount;
+    gform.date.value = g.date;
+    g.assets.forEach((id) => gPicked.add(id));
+  }
+  setGoalBasis(g && g.assets.length ? "pick" : "net");
+  gdlg.showModal();
+  gform.name.focus();
+}
+
+gform.onsubmit = async (e) => {
+  e.preventDefault();
+  if (gBasis === "pick" && !gPicked.size) return ($("gerr").textContent = "請至少勾選一個項目，或改用「全部淨資產」");
+  try {
+    data = await invoke("save_goal", {
+      goal: {
+        id: editingGoal, name: gform.name.value.trim(), icon: gIcon.value, amount: num(gform.amount.value),
+        date: gform.date.value.trim(), assets: gBasis === "pick" ? [...gPicked] : [], history: [],
+      },
+    });
+    gdlg.close();
+    render();
+    toast(editingGoal ? "目標已更新" : "目標已新增");
+  } catch (err) {
+    $("gerr").textContent = String(err);
+  }
+};
+
+$("goal-panel").onclick = async (e) => {
+  if (e.target.closest("[data-gadd]")) return openGoal(null);
+  const card = e.target.closest("[data-gid]");
+  if (!card) return;
+  const g = data.goals.find((x) => x.id === Number(card.dataset.gid));
+  if (!g) return;
+  if (e.target.closest("[data-gedit]")) openGoal(g);
+  else if (e.target.closest("[data-gdel]") && (await confirmBox(`刪除目標「${g.name}」？`, "只會刪除目標，不會動到你的資產"))) {
+    try { data = await invoke("delete_goal", { id: g.id }); render(); toast("已刪除目標"); } catch (err) { toast(String(err)); }
+  }
+};
 
 /* ---------- render ---------- */
 function render() {
@@ -294,16 +415,8 @@ function render() {
     d.className = diff >= 0 ? "pos" : "neg";
   } else d.textContent = "";
 
-  if (data.goal > 0) {
-    $("goal-pct").textContent = ((net / data.goal) * 100).toFixed(1) + "%";
-    $("goal-bar").style.width = Math.max(0, Math.min(1, net / data.goal)) * 100 + "%";
-    $("goal-text").textContent = net >= data.goal ? "🎉 已達成目標" : ui.hidden ? "" : `還差 ${fmt0.format(data.goal - net)}`;
-  } else {
-    $("goal-pct").textContent = "—";
-    $("goal-bar").style.width = "0";
-    $("goal-text").textContent = "到「設定」設定淨資產目標";
-  }
-  renderGoalPanel(net);
+  renderGoalHero();
+  renderGoals();
   renderPortfolio();
 
   const cats = [...new Set(data.assets.map((a) => a.category))].sort();
@@ -503,7 +616,8 @@ function drawTrend() {
     return;
   }
   let min = Math.min(...all.map((p) => p.v)), max = Math.max(...all.map((p) => p.v));
-  if (data.goal > 0 && data.goal <= max * 1.6 && all.length > 1) max = Math.max(max, data.goal);
+  const netGoals = data.goals.filter((x) => !x.assets.length);
+  if (all.length > 1) max = Math.max(max, ...netGoals.map((x) => x.amount).filter((a) => a <= max * 1.6));
   if (min === max) { const m = Math.abs(min) * 0.05 || 1; min -= m; max += m; }
   const x = (i) => padL + (all.length === 1 ? (W - padL - padR) / 2 : (i * (W - padL - padR)) / (all.length - 1));
   const y = (v) => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
@@ -516,13 +630,13 @@ function drawTrend() {
     g.beginPath(); g.moveTo(padL, yy); g.lineTo(W - padR, yy); g.stroke();
     if (!ui.hidden) { g.fillStyle = css("--muted"); g.fillText(fmt0.format(v), 2, yy + 3); }
   }
-  if (data.goal > 0 && data.goal >= min && data.goal <= max) { // goal line
+  netGoals.filter((x) => x.amount >= min && x.amount <= max).slice(0, 4).forEach((x) => { // goal lines
     g.setLineDash([5, 4]); g.strokeStyle = "#3ecf8e"; g.lineWidth = 1.5;
-    g.beginPath(); g.moveTo(padL, y(data.goal)); g.lineTo(W - padR, y(data.goal)); g.stroke();
+    g.beginPath(); g.moveTo(padL, y(x.amount)); g.lineTo(W - padR, y(x.amount)); g.stroke();
     g.setLineDash([]); g.fillStyle = "#12935a"; g.textAlign = "right";
-    g.fillText("目標", W - padR, y(data.goal) - 4);
+    g.fillText(`${x.icon} ${x.name}`, W - padR, y(x.amount) - 4);
     g.textAlign = "left";
-  }
+  });
   const accent = css("--accent");
   const grad = g.createLinearGradient(0, padT, 0, H - padB);
   grad.addColorStop(0, accent + "55");
@@ -761,7 +875,7 @@ tform.onsubmit = async (e) => {
 
 /* ---------- settings dialog ---------- */
 const sdlg = $("sdlg"), sform = $("sform");
-let refreshSel = 0, syncLoaded = null;
+let refreshSel = 0;
 
 function rateRow(code, val) {
   const base = code === "TWD";
@@ -779,19 +893,7 @@ $("refresh-seg").onclick = (e) => {
   if (b) setRefreshSeg(Number(b.dataset.m));
 };
 
-function showSyncInfo(i) {
-  syncLoaded = i;
-  $("sync-on").checked = i.enabled;
-  $("sync-port").value = i.port;
-  $("sync-pin").value = i.pin;
-  $("sync-info").textContent = i.running && i.urls.length
-    ? `服務執行中。手機瀏覽器開啟 ${i.urls.join("、")}，輸入 PIN 即可。連線為區網 HTTP（未加密），請只在可信任的網路使用。`
-    : "未啟動。";
-}
-
 async function openSettings() {
-  sform.goal.value = data.goal || "";
-  sform.goal_date.value = data.goal_date || "";
   setRefreshSeg(data.refresh_min || 0);
   $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
   $("new-code").value = $("new-rate").value = "";
@@ -800,8 +902,7 @@ async function openSettings() {
   if (inTauri) {
     try {
       $("ver").textContent = "目前版本 v" + (await window.__TAURI__.core.invoke("app_version"));
-      showSyncInfo(await invoke("get_sync"));
-    } catch (e) { $("sync-info").textContent = String(e); }
+    } catch (e) { $("upd-status").textContent = String(e); }
   }
 }
 $("settings-btn").onclick = openSettings;
@@ -821,16 +922,8 @@ sform.onsubmit = async (e) => {
     rates[code] = parseFloat($("new-rate").value) || 0;
   }
   try {
-    if (inTauri && syncLoaded) {
-      const on = $("sync-on").checked, port = parseInt($("sync-port").value, 10) || 8787;
-      let pin = $("sync-pin").value.trim();
-      if (on && !pin) pin = String(Math.floor(100000 + Math.random() * 900000));
-      if (on !== syncLoaded.enabled || port !== syncLoaded.port || pin !== syncLoaded.pin) {
-        showSyncInfo(await invoke("set_sync", { enabled: on, port, pin }));
-      }
-    }
     data = await invoke("set_settings", {
-      rates, goal: num(sform.goal.value), goal_date: sform.goal_date.value.trim(), refresh_min: refreshSel,
+      rates, refresh_min: refreshSel,
     });
     sdlg.close();
     render();
@@ -1129,6 +1222,43 @@ $("restore-file").onchange = async (e) => {
   } catch (err) { toast("還原失敗：" + err); }
 };
 
+/* ---------- phone / LAN connection (desktop only) ---------- */
+const phdlg = $("phdlg");
+
+function showPhone(i) {
+  $("sync-on").checked = i.enabled;
+  $("sync-port").value = i.port;
+  $("sync-pin").value = i.pin;
+  $("ph-conn").hidden = !i.running;
+  $("ph-qr").innerHTML = i.qr || "";
+  $("ph-urls").innerHTML = i.urls.length
+    ? i.urls.map((u) => `<div class="url">${esc(u)}</div>`).join("")
+    : '<p class="muted">找不到區網位址，請確認電腦已連上 Wi-Fi 或網路。</p>';
+  $("ph-status").textContent = i.running ? "● 服務執行中" : i.enabled ? "服務未能啟動（連接埠可能被占用，請換一個）" : "未啟用";
+  $("ph-status").className = "hint " + (i.running ? "pos" : "");
+  $("phone-btn").classList.toggle("live", i.running);
+}
+$("phone-btn").onclick = async () => {
+  $("pherr").textContent = "";
+  $("ph-tips").hidden = true;
+  phdlg.showModal();
+  try { showPhone(await invoke("get_sync")); } catch (err) { $("pherr").textContent = String(err); }
+};
+$("ph-tips-btn").onclick = () => ($("ph-tips").hidden = !$("ph-tips").hidden);
+$("phform").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const on = $("sync-on").checked, port = parseInt($("sync-port").value, 10) || 8787;
+    let pin = $("sync-pin").value.trim();
+    if (on && !pin) pin = String(Math.floor(100000 + Math.random() * 900000));
+    showPhone(await invoke("set_sync", { enabled: on, port, pin }));
+    $("pherr").textContent = "";
+    toast(on ? "手機連線已啟用" : "手機連線已關閉");
+  } catch (err) {
+    $("pherr").textContent = String(err);
+  }
+};
+
 /* ---------- boot ---------- */
 document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !inTauri));
 invoke("get_data")
@@ -1140,6 +1270,7 @@ invoke("get_data")
   })
   .catch((err) => toast(String(err)));
 if (inTauri) {
+  invoke("get_sync").then((i) => $("phone-btn").classList.toggle("live", i.running)).catch(() => {});
   setTimeout(() => checkUpdate(false), 4000);
   setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
 }

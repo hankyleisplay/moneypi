@@ -244,3 +244,52 @@ canvas.short{height:200px}
 .prow .pct{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
 .plist{display:grid;gap:2px;margin-top:12px}
 @media (max-width:640px){.frow{grid-template-columns:72px 1fr auto auto}.frow .note-t{display:none}.prow{grid-template-columns:1fr 1fr}.prow .pct{grid-column:1/-1;text-align:left}}
+
+/* ---------- v0.5: goals / phone connection / mobile ---------- */
+.desk-only[hidden]{display:none!important}
+.hint.pos{color:var(--pos);font-weight:600}
+.goals{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px}
+.gcard{padding:16px;border-radius:20px;background:rgba(255,255,255,.62);border:1px solid var(--line);box-shadow:inset 0 1.5px 0 #fff,0 6px 18px rgba(40,55,120,.08);display:grid;gap:10px;align-content:start}
+.gcard.done{background:linear-gradient(135deg,rgba(110,231,160,.28),rgba(255,255,255,.65))}
+.ghead{display:flex;align-items:center;gap:10px}
+.gicon{flex:none;width:42px;height:42px;border-radius:14px;display:grid;place-items:center;font-size:22px;background:rgba(255,255,255,.85);border:1px solid var(--line);box-shadow:inset 0 1.5px 0 #fff}
+.gname{flex:1;min-width:0;display:grid;line-height:1.3}
+.gname b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gname small{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gbtns{display:flex;flex:none}
+.gamt{display:flex;align-items:baseline;gap:4px;flex-wrap:wrap;font-variant-numeric:tabular-nums}
+.gamt b{font-size:18px}
+.gpct{margin-left:auto;font-weight:700;color:var(--accent)}
+.gcard .progress{margin:0}
+.gline{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:13px}
+.gline span{color:var(--muted)}
+.gline small{color:var(--muted)}
+.checks{display:grid;gap:2px;max-height:200px;overflow-y:auto;margin-top:8px;padding:6px;border-radius:16px;background:rgba(255,255,255,.55);border:1px solid var(--line);scrollbar-width:thin}
+label.chk.sm{margin:0;padding:6px 8px;border-radius:10px;font-size:14px}
+label.chk.sm:hover{background:rgba(47,107,255,.07)}
+.conn{display:flex;gap:16px;align-items:center;margin-top:12px;padding:14px;border-radius:18px;background:rgba(255,255,255,.6);border:1px solid var(--line);flex-wrap:wrap}
+.conn[hidden],.tips[hidden]{display:none}
+.qr{flex:none;width:170px;height:170px;border-radius:14px;overflow:hidden;background:#fff;border:1px solid var(--line)}
+.qr svg{width:100%;height:100%;display:block}
+.conn-t{flex:1;min-width:180px}
+.conn-t p{margin:0 0 6px}
+.url{font:600 14px ui-monospace,Consolas,monospace;padding:6px 10px;border-radius:10px;background:rgba(47,107,255,.08);margin-bottom:6px;word-break:break-all;user-select:all}
+.tips{margin-top:6px;padding:10px 14px;border-radius:14px;background:rgba(255,255,255,.55);border:1px solid var(--line);font-size:13px;color:var(--muted)}
+.tips ol{margin:0;padding-left:18px;display:grid;gap:4px}
+.tips b{color:var(--fg)}
+#phone-btn.live{color:var(--pos)}
+#phone-btn.live::after{content:"";position:absolute;top:5px;right:5px;width:8px;height:8px;border-radius:50%;background:#3ecf8e;border:2px solid #fff}
+#phone-btn{position:relative}
+
+@supports (height:100dvh){.app{height:100dvh}}
+@media (max-width:640px){
+  .app{padding:max(10px,env(safe-area-inset-top)) max(10px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left))}
+  input,.dd-btn{font-size:16px}
+  button{min-height:38px}
+  button.link{min-height:0}
+  .actions{justify-content:flex-start}
+  .bar{padding:8px 12px}
+  .goals{grid-template-columns:1fr}
+  .qr{width:100%;max-width:220px;height:auto;aspect-ratio:1;margin:0 auto}
+  dialog{width:min(96vw,430px);padding:18px}
+}
