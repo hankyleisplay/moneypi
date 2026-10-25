@@ -77,6 +77,20 @@ struct Asset {
     txs: Vec<Tx>,
 }
 
+/// One income/expense entry of the bookkeeping ledger (always TWD).
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Flow {
+    #[serde(default)]
+    id: u64,
+    date: String,
+    /// "in" | "out"
+    kind: String,
+    category: String,
+    amount: f64,
+    #[serde(default)]
+    note: String,
+}
+
 /// Totals are stored in the base currency (TWD) at the rates in force on that day.
 #[derive(Serialize, Deserialize, Clone)]
 struct Snapshot {
@@ -105,6 +119,10 @@ struct Data {
     sync_port: u16,
     #[serde(default)]
     sync_pin: String,
+    #[serde(default)]
+    cashflow: Vec<Flow>,
+    #[serde(default)]
+    next_flow: u64,
 }
 
 impl Default for Data {
@@ -120,6 +138,8 @@ impl Default for Data {
             sync_enabled: false,
             sync_port: DEFAULT_PORT,
             sync_pin: String::new(),
+            cashflow: vec![],
+            next_flow: 0,
         }
     }
 }
@@ -230,6 +250,22 @@ fn validate_asset(a: &Asset, d: &Data) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_flow(f: &Flow) -> Result<(), String> {
+    if !valid_date(&f.date) {
+        return Err("日期格式需為 YYYY-MM-DD".into());
+    }
+    if !matches!(f.kind.as_str(), "in" | "out") {
+        return Err("未知的收支類型".into());
+    }
+    if !f.amount.is_finite() || f.amount <= 0.0 {
+        return Err("金額必須大於 0".into());
+    }
+    if f.category.is_empty() {
+        return Err("請選擇類別".into());
+    }
+    Ok(())
+}
+
 fn validate_tx(t: &Tx) -> Result<(), String> {
     if !valid_date(&t.date) {
         return Err("日期格式需為 YYYY-MM-DD".into());
@@ -265,8 +301,64 @@ impl Core {
             Some(last) if last.date == date => *last = snap,
             _ => d.snapshots.push(snap),
         }
+        self.persist(d)
+    }
+
+    fn persist(&self, d: &Data) -> Result<(), String> {
         let json = serde_json::to_string_pretty(d).map_err(|e| e.to_string())?;
         fs::write(&self.path, json).map_err(|e| e.to_string())
+    }
+
+    fn add_flow(&self, mut f: Flow) -> Result<Value, String> {
+        f.category = f.category.trim().to_string();
+        f.note = f.note.trim().to_string();
+        validate_flow(&f)?;
+        let mut d = self.data.lock().unwrap();
+        d.next_flow += 1;
+        f.id = d.next_flow;
+        d.cashflow.push(f);
+        self.persist(&d)?;
+        Ok(view(&d))
+    }
+
+    fn delete_flow(&self, id: u64) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.cashflow.retain(|f| f.id != id);
+        self.persist(&d)?;
+        Ok(view(&d))
+    }
+
+    fn export_backup(&self) -> String {
+        let mut d = self.data.lock().unwrap().clone();
+        d.sync_pin.clear();
+        serde_json::to_string_pretty(&d).unwrap_or_default()
+    }
+
+    fn import_backup(&self, text: &str) -> Result<Value, String> {
+        let mut inc: Data = serde_json::from_str(text).map_err(|e| format!("備份檔格式錯誤：{e}"))?;
+        if inc.rates.get(BASE) != Some(&1.0) || inc.rates.values().any(|r| !r.is_finite() || *r <= 0.0) {
+            return Err("備份檔的匯率資料不正確".into());
+        }
+        for a in &inc.assets {
+            validate_asset(a, &inc).map_err(|e| format!("備份檔中的「{}」：{e}", a.name))?;
+        }
+        for f in &inc.cashflow {
+            validate_flow(f)?;
+        }
+        let mut d = self.data.lock().unwrap();
+        // The backup only carries finance data; keep this machine's own sync settings.
+        inc.sync_enabled = d.sync_enabled;
+        inc.sync_port = d.sync_port;
+        inc.sync_pin = d.sync_pin.clone();
+        inc.next_id = inc.next_id.max(inc.assets.iter().map(|a| a.id).max().unwrap_or(0));
+        inc.next_flow = inc.next_flow.max(inc.cashflow.iter().map(|f| f.id).max().unwrap_or(0));
+        let _ = fs::copy(&self.path, self.path.with_extension("before-restore.json"));
+        for a in inc.assets.iter_mut() {
+            recompute(a);
+        }
+        *d = inc;
+        self.commit(&mut d)?;
+        Ok(view(&d))
     }
 
     fn save_asset(&self, mut asset: Asset) -> Result<Value, String> {
@@ -677,6 +769,10 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "refresh_quotes" => core.refresh_quotes(),
         "export_csv" => Ok(Value::String(core.export_csv())),
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
+        "add_flow" => core.add_flow(arg(&args, "flow")?),
+        "delete_flow" => core.delete_flow(arg(&args, "id")?),
+        "export_backup" => Ok(Value::String(core.export_backup())),
+        "import_backup" => core.import_backup(&arg::<String>(&args, "text")?),
         "get_sync" if !remote => Ok(core.sync_info()),
         "set_sync" if !remote => core.set_sync(arg(&args, "enabled")?, arg(&args, "port")?, arg(&args, "pin")?),
         _ => Err(format!("不支援的命令：{cmd}")),
@@ -853,6 +949,16 @@ mod tests {
         let rows = parse_csv("\u{feff}a,b\r\n\"x,1\",\"he said \"\"hi\"\"\"\n");
         assert_eq!(rows[1], vec!["x,1".to_string(), "he said \"hi\"".to_string()]);
         assert_eq!(csv_field("he said \"hi\""), "\"he said \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn flow_validation() {
+        let ok = Flow { id: 0, date: "2026-10-01".into(), kind: "out".into(), category: "餐飲".into(), amount: 120.0, note: String::new() };
+        assert!(validate_flow(&ok).is_ok());
+        assert!(validate_flow(&Flow { amount: 0.0, ..ok.clone() }).is_err());
+        assert!(validate_flow(&Flow { kind: "x".into(), ..ok.clone() }).is_err());
+        assert!(validate_flow(&Flow { date: "2026-13-40".into(), ..ok.clone() }).is_err());
+        assert!(validate_flow(&Flow { category: String::new(), ..ok }).is_err());
     }
 
     #[test]

@@ -54,9 +54,9 @@ function askPin(msg) {
   });
 }
 
-let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goal: 0, goal_date: "", refresh_min: 0 };
+let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goal: 0, goal_date: "", refresh_min: 0, cashflow: [] };
 const ui = {
-  kind: "all", cat: "", q: "", sort: "value", range: 0, sel: null, hover: -1,
+  kind: "all", cat: "", q: "", sort: "value", range: 0, sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
   hidden: store.get("hidden", "0") === "1",
 };
 
@@ -76,10 +76,22 @@ function catColor(c) {
 function toast(msg) {
   const t = $("toast");
   t.textContent = msg;
-  t.hidden = false;
+  // popover => top layer, so the toast stays visible above open modal dialogs
+  try { t.hidePopover(); } catch {}
+  try { t.showPopover(); } catch {}
   clearTimeout(toast.id);
-  toast.id = setTimeout(() => (t.hidden = true), 3200);
+  toast.id = setTimeout(() => { try { t.hidePopover(); } catch {} }, 3400);
 }
+
+// jelly squish on every press
+document.addEventListener("pointerdown", (e) => {
+  const el = e.target.closest("button:not(.link):not(:disabled), .card, .stat");
+  if (!el) return;
+  el.classList.remove("jelly");
+  void el.offsetWidth;
+  el.classList.add("jelly");
+});
+document.addEventListener("animationend", (e) => e.target.classList.remove("jelly"));
 
 /* ---------- custom dropdown (replaces native <select>) ---------- */
 class Dropdown {
@@ -263,7 +275,7 @@ $("goal-panel").onclick = (e) => e.target.closest("[data-goal-edit]") && openSet
 
 /* ---------- render ---------- */
 function render() {
-  if (ui.sel && !data.assets.some((a) => a.id === ui.sel)) ui.sel = null;
+  if (typeof ui.sel === "number" && !data.assets.some((a) => a.id === ui.sel)) ui.sel = null;
   const A = data.assets.filter((a) => !a.liability);
   const L = data.assets.filter((a) => a.liability);
   const ta = sum(A), tl = sum(L), net = ta - tl;
@@ -292,6 +304,7 @@ function render() {
     $("goal-text").textContent = "到「設定」設定淨資產目標";
   }
   renderGoalPanel(net);
+  renderPortfolio();
 
   const cats = [...new Set(data.assets.map((a) => a.category))].sort();
   if (!cats.includes(ui.cat)) ui.cat = "";
@@ -320,6 +333,7 @@ function visibleAssets() {
 function renderList() {
   const xs = visibleAssets();
   $("nav-overview").classList.toggle("on", ui.sel === null);
+  $("nav-flow").classList.toggle("on", ui.sel === "flow");
   $("empty").hidden = xs.length > 0;
   $("empty").textContent = data.assets.length ? "沒有符合條件的項目" : "尚無項目，按下方「新增項目」開始記錄";
   $("list").innerHTML = xs
@@ -383,10 +397,13 @@ function holdingHtml(a) {
 }
 
 function renderView() {
-  const a = data.assets.find((x) => x.id === ui.sel);
-  $("view-overview").hidden = !!a;
+  const a = typeof ui.sel === "number" ? data.assets.find((x) => x.id === ui.sel) : null;
+  const flow = ui.sel === "flow";
+  $("view-overview").hidden = !!a || flow;
   $("view-detail").hidden = !a;
-  $("title").textContent = a ? a.name : "總覽";
+  $("view-flow").hidden = !flow;
+  $("title").textContent = a ? a.name : flow ? "記帳" : "總覽";
+  if (flow) return renderFlow();
   if (!a) return drawCharts();
 
   const pool = sum(data.assets.filter((x) => x.liability === a.liability));
@@ -417,6 +434,7 @@ function select(id) {
   if (innerWidth <= 640) setCollapsed(true);
 }
 $("nav-overview").onclick = () => select(null);
+$("nav-flow").onclick = () => select("flow");
 $("list").onclick = (e) => {
   const b = e.target.closest(".item");
   if (b) select(Number(b.dataset.id));
@@ -463,8 +481,11 @@ function drawCharts() {
   if ($("view-overview").hidden) return;
   drawTrend();
   drawAlloc();
+  drawMonths();
 }
-new ResizeObserver(drawCharts).observe($("trend"));
+const ro = new ResizeObserver(drawCharts);
+ro.observe($("trend"));
+ro.observe($("months"));
 
 function drawTrend() {
   const { g, W, H } = setupCanvas($("trend"));
@@ -587,8 +608,9 @@ $("kind").onclick = (e) => {
 $("q").oninput = (e) => { ui.q = e.target.value; renderList(); };
 
 /* ---------- confirm dialog ---------- */
-function confirmBox(msg, sub = "") {
+function confirmBox(msg, sub = "", ok = "刪除") {
   const d = $("cdlg");
+  $("cok").textContent = ok;
   $("cmsg").textContent = msg;
   $("csub").textContent = sub;
   d.returnValue = "";
@@ -883,31 +905,229 @@ $("import-file").onchange = async (e) => {
 };
 
 /* ---------- auto update (desktop only) ---------- */
+let pendingUpdate = null;
 async function checkUpdate(manual) {
   if (!inTauri) return;
+  const st = $("upd-status"), btn = $("upd-btn");
+  if (manual) { btn.disabled = true; btn.textContent = "檢查中…"; st.textContent = ""; }
   try {
     const u = await window.__TAURI__.core.invoke("check_update");
     if (u) {
+      pendingUpdate = u;
       $("update-text").textContent = `發現新版本 v${u.version}`;
       $("update-bar").hidden = false;
-      if (manual) toast(`發現新版本 v${u.version}`);
-    } else if (manual) toast("目前已是最新版本");
+      st.textContent = `發現新版本 v${u.version}，按下「立即更新」安裝`;
+      btn.textContent = "立即更新";
+    } else if (manual) {
+      st.textContent = `✓ 目前已是最新版本（${$("ver").textContent.replace("目前版本 ", "")}）`;
+      btn.textContent = "檢查更新";
+    }
   } catch (err) {
-    if (manual) toast("檢查更新失敗：" + err);
+    if (manual) { st.textContent = "檢查失敗：" + err; btn.textContent = "檢查更新"; }
+  } finally {
+    btn.disabled = false;
   }
 }
-$("update-later").onclick = () => ($("update-bar").hidden = true);
-$("update-now").onclick = async () => {
-  $("update-now").disabled = true;
+async function installUpdate() {
+  $("update-now").disabled = $("upd-btn").disabled = true;
   $("update-text").textContent = "下載並安裝中，完成後會自動重新啟動…";
+  $("upd-status").textContent = "下載並安裝中，完成後會自動重新啟動…";
   try {
     await window.__TAURI__.core.invoke("install_update");
   } catch (err) {
-    $("update-now").disabled = false;
+    $("update-now").disabled = $("upd-btn").disabled = false;
+    $("upd-status").textContent = "更新失敗：" + err;
     toast("更新失敗：" + err);
   }
+}
+$("update-later").onclick = () => ($("update-bar").hidden = true);
+$("update-now").onclick = installUpdate;
+$("upd-btn").onclick = () => (pendingUpdate ? installUpdate() : checkUpdate(true));
+
+/* ---------- portfolio overview ---------- */
+function renderPortfolio() {
+  const el = $("port-panel");
+  const hs = data.assets.filter((a) => a.holding && !a.liability);
+  if (!hs.length) { el.hidden = true; return; }
+  el.hidden = false;
+  const r = (a) => rate(a.currency), m = mask();
+  const val = hs.reduce((t, a) => t + a.value * r(a), 0);
+  const wc = hs.filter((a) => a.cost > 0 && a.quantity > 0);
+  const cost = wc.reduce((t, a) => t + a.cost * r(a), 0);
+  const unreal = wc.reduce((t, a) => t + (a.value - a.cost) * r(a), 0);
+  const real = hs.reduce((t, a) => t + a.realized * r(a), 0);
+  const div = hs.reduce((t, a) => t + a.dividends * r(a), 0);
+  const tile = (k, v, cls = "", sub = "") => `<div class="stat ${cls}"><span>${k}</span><b class="${m}">${v}</b>${sub ? `<small class="${m}">${sub}</small>` : ""}</div>`;
+  const rows = hs
+    .map((a) => ({ a, pct: a.cost > 0 && a.quantity > 0 ? ((a.value - a.cost) / a.cost) * 100 : null }))
+    .sort((x, y) => (y.pct ?? -1e9) - (x.pct ?? -1e9));
+  const maxAbs = Math.max(1, ...rows.map((x) => Math.abs(x.pct ?? 0)));
+  el.innerHTML = `<div class="panel-head"><h3>投資組合</h3></div>
+    <div class="stats">
+      ${tile("持倉市值", money(val))}
+      ${tile("總成本", cost > 0 ? money(cost) : "—")}
+      ${cost > 0 ? tile("未實現損益", signed(unreal), unreal >= 0 ? "up" : "down", `${signed((unreal / cost) * 100, fmt)}%`) : ""}
+      ${real ? tile("已實現損益", signed(real), real >= 0 ? "up" : "down") : ""}
+      ${div ? tile("累計配息", money(div), "up") : ""}
+    </div>
+    <div class="plist">${rows.map(({ a, pct }) => `<button class="prow" data-id="${a.id}">
+      <span><b>${esc(a.name)}</b><small>${esc(a.symbol || a.category)}</small></span>
+      <span class="bar-track"><span class="bar-fill" style="display:block;width:${pct === null ? 0 : Math.max(3, (Math.abs(pct) / maxAbs) * 100)}%;background:${pct !== null && pct < 0 ? "#fb7185" : "#3ecf8e"}"></span></span>
+      <span class="pct ${pct === null ? "muted" : pct >= 0 ? "pos" : "neg"}">${pct === null ? "—" : signed(pct, fmt) + "%"}</span>
+    </button>`).join("")}</div>`;
+}
+$("port-panel").onclick = (e) => {
+  const b = e.target.closest("[data-id]");
+  if (b) select(Number(b.dataset.id));
 };
-$("upd-btn").onclick = () => checkUpdate(true);
+
+/* ---------- monthly net-worth change ---------- */
+function monthlyChanges() {
+  const last = new Map();
+  data.snapshots.forEach((s) => last.set(s.date.slice(0, 7), s.assets - s.liabilities)); // chronological: last of month wins
+  const keys = [...last.keys()].sort();
+  return keys.slice(1).map((k, i) => ({ m: k, v: last.get(k) - last.get(keys[i]) }));
+}
+const compact = (v) => (Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(Math.abs(v) >= 1e5 ? 0 : 1) + "萬" : fmt0.format(v));
+
+function drawMonths() {
+  const { g, W, H } = setupCanvas($("months"));
+  if (W < 80) return;
+  const rows = monthlyChanges().slice(-12);
+  $("months-note").textContent = rows.length ? "每月月底淨資產相較上月底的變化（本月為截至目前）。" : "";
+  g.font = "11px 'Segoe UI Variable', sans-serif";
+  if (!rows.length) {
+    g.fillStyle = css("--muted"); g.textAlign = "center";
+    g.fillText("累積滿兩個月的記錄後，會顯示每月變化", W / 2, H / 2);
+    return;
+  }
+  const top = 18, bot = H - 22;
+  const maxV = Math.max(...rows.map((r) => r.v), 0), minV = Math.min(...rows.map((r) => r.v), 0);
+  const span = maxV - minV || 1, y0 = top + (maxV / span) * (bot - top);
+  const bw = Math.min(46, (W / rows.length) * 0.58), step = W / rows.length;
+  g.strokeStyle = css("--line"); g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, y0); g.lineTo(W, y0); g.stroke();
+  rows.forEach((r, i) => {
+    const x = i * step + (step - bw) / 2, h = Math.max(2, (Math.abs(r.v) / span) * (bot - top));
+    const y = r.v >= 0 ? y0 - h : y0;
+    g.fillStyle = r.v >= 0 ? "#3ecf8e" : "#fb7185";
+    g.beginPath(); g.roundRect(x, y, bw, h, 6); g.fill();
+    g.fillStyle = css("--muted"); g.textAlign = "center";
+    g.fillText(r.m.slice(2).replace("-", "/"), x + bw / 2, H - 6);
+    if (!ui.hidden) { g.fillStyle = css("--fg"); g.fillText(compact(r.v), x + bw / 2, r.v >= 0 ? y - 4 : y + h + 12); }
+  });
+}
+
+/* ---------- bookkeeping (income / expense) ---------- */
+const FLOW_CATS = { out: ["餐飲", "交通", "居住", "娛樂", "購物", "醫療", "學習", "其他"], in: ["薪資", "獎金", "投資", "其他"] };
+const shiftMonth = (ym, d) => {
+  const [y, m] = ym.split("-").map(Number), dt = new Date(y, m - 1 + d, 1);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}`;
+};
+
+function renderFlow() {
+  const ym = ui.fm, all = data.cashflow || [];
+  $("fm-label").textContent = ym.replace("-", " 年 ") + " 月";
+  const mf = all.filter((f) => f.date.startsWith(ym));
+  const tot = (xs, k) => xs.filter((f) => f.kind === k).reduce((t, f) => t + f.amount, 0);
+  const inc = tot(mf, "in"), out = tot(mf, "out"), bal = inc - out, m = mask();
+  const tile = (k, v, cls = "", sub = "") => `<div class="stat ${cls}"><span>${k}</span><b class="${m}">${v}</b>${sub ? `<small>${sub}</small>` : ""}</div>`;
+  // average balance over the last 6 months that have any entries
+  const months = new Map();
+  all.forEach((f) => months.set(f.date.slice(0, 7), (months.get(f.date.slice(0, 7)) || 0) + (f.kind === "in" ? f.amount : -f.amount)));
+  const recent = [...months.entries()].sort().slice(-6).map(([, v]) => v);
+  const avg = recent.length >= 2 ? recent.reduce((a, b) => a + b, 0) / recent.length : null;
+  $("flow-sum").innerHTML =
+    tile("收入", money(inc), "up") + tile("支出", money(out), "down") +
+    tile("結餘", money(bal), bal >= 0 ? "up" : "down") +
+    tile("儲蓄率", inc > 0 ? ((bal / inc) * 100).toFixed(1) + "%" : "—") +
+    (avg !== null ? tile(`近 ${recent.length} 個月平均結餘`, money(avg), avg >= 0 ? "up" : "down", "僅計有記帳的月份") : "");
+
+  const byCat = {};
+  mf.filter((f) => f.kind === "out").forEach((f) => (byCat[f.category] = (byCat[f.category] || 0) + f.amount));
+  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  $("flow-cats").innerHTML = cats.length
+    ? cats.map(([c, v], i) => `<div class="bar-row"><span>${esc(c)}</span>
+        <span class="bar-track"><span class="bar-fill" style="display:block;width:${(v / out) * 100}%;background:${COLORS[i % COLORS.length]}"></span></span>
+        <span class="${m}">${fmt0.format(v)} <span class="muted">${((v / out) * 100).toFixed(0)}%</span></span></div>`).join("")
+    : '<p class="muted">這個月還沒有支出記錄。</p>';
+
+  const list = [...mf].sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
+  $("flow-count").textContent = `(${list.length})`;
+  $("flow-list").innerHTML = list.length
+    ? list.map((f) => `<div class="frow"><span class="muted">${esc(f.date.slice(5))}</span>
+        <span class="tag">${esc(f.category)}</span><span class="note-t">${esc(f.note)}</span>
+        <span class="amt ${f.kind === "in" ? "pos" : "neg"} ${m}">${f.kind === "in" ? "+" : "−"}${fmt0.format(f.amount)}</span>
+        <button class="link danger" data-delflow="${f.id}">刪除</button></div>`).join("")
+    : '<p class="muted">沒有記錄，按右上角「記一筆」開始記帳。</p>';
+}
+$("fm-prev").onclick = () => { ui.fm = shiftMonth(ui.fm, -1); renderFlow(); };
+$("fm-next").onclick = () => { ui.fm = shiftMonth(ui.fm, 1); renderFlow(); };
+$("flow-list").onclick = async (e) => {
+  const b = e.target.closest("[data-delflow]");
+  if (!b) return;
+  const f = data.cashflow.find((x) => x.id === Number(b.dataset.delflow));
+  if (f && (await confirmBox(`刪除這筆${f.kind === "in" ? "收入" : "支出"}？`, `${f.date} ${f.category} ${fmt0.format(f.amount)}`))) {
+    try { data = await invoke("delete_flow", { id: f.id }); render(); toast("已刪除"); } catch (err) { toast(String(err)); }
+  }
+};
+
+const fdlg = $("fdlg"), fform = $("fform"), ffCat = new Dropdown($("ff-cat"));
+let flowKind = "out";
+function setFlowKind(k) {
+  flowKind = k;
+  [...$("f-kind").children].forEach((b) => b.classList.toggle("on", b.dataset.k === k));
+  ffCat.setOptions(FLOW_CATS[k], FLOW_CATS[k][0]);
+}
+$("f-kind").onclick = (e) => { const b = e.target.closest("button"); if (b) setFlowKind(b.dataset.k); };
+$("flow-add").onclick = () => {
+  fform.reset();
+  $("ferr").textContent = "";
+  setFlowKind("out");
+  fform.date.value = ui.fm === todayStr().slice(0, 7) ? todayStr() : ui.fm + "-01";
+  fdlg.showModal();
+  fform.amount.focus();
+};
+fform.onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    data = await invoke("add_flow", {
+      flow: { id: 0, date: fform.date.value.trim(), kind: flowKind, category: ffCat.value, amount: num(fform.amount.value), note: fform.note.value.trim() },
+    });
+    ui.fm = fform.date.value.trim().slice(0, 7);
+    fdlg.close();
+    render();
+    toast("已記一筆");
+  } catch (err) {
+    $("ferr").textContent = String(err);
+  }
+};
+
+/* ---------- full backup / restore ---------- */
+$("backup-btn").onclick = async () => {
+  try {
+    const txt = await invoke("export_backup");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([txt], { type: "application/json;charset=utf-8" }));
+    a.download = `moneypi-backup-${todayStr()}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    toast("已匯出備份");
+  } catch (err) { toast("備份失敗：" + err); }
+};
+$("restore-btn").onclick = () => $("restore-file").click();
+$("restore-file").onchange = async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  if (!(await confirmBox("還原備份？", "將以備份內容取代目前所有資料（原資料會自動另存為 moneypi.before-restore.json）", "還原"))) return;
+  try {
+    data = await invoke("import_backup", { text: await f.text() });
+    ui.sel = null;
+    render();
+    toast("已還原備份");
+  } catch (err) { toast("還原失敗：" + err); }
+};
 
 /* ---------- boot ---------- */
 document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !inTauri));

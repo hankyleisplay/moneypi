@@ -23,6 +23,11 @@
       <span class="lbl">總覽</span>
     </button>
 
+    <button class="nav" id="nav-flow" title="記帳">
+      <span class="av" style="background:linear-gradient(145deg,#3ecf8e,#2dc4b2)"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M5 4h14v16l-3-2-2 2-2-2-2 2-2-2-3 2zM8 9h8M8 13h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span class="lbl">記帳</span>
+    </button>
+
     <div class="side-tools">
       <input id="q" type="text" placeholder="搜尋項目…" autocomplete="off">
       <div class="seg" id="kind">
@@ -80,6 +85,8 @@
 
       <section class="glass panel" id="goal-panel"></section>
 
+      <section class="glass panel" id="port-panel" hidden></section>
+
       <section class="charts">
         <div class="glass panel">
           <div class="panel-head">
@@ -96,9 +103,26 @@
           <ul id="legend"></ul>
         </div>
       </section>
+      <section class="glass panel">
+        <div class="panel-head"><h3>每月淨資產變化</h3></div>
+        <canvas id="months" class="short"></canvas>
+        <p class="note" id="months-note"></p>
+      </section>
     </div>
 
     <div id="view-detail" class="view" hidden></div>
+
+    <div id="view-flow" class="view" hidden>
+      <div class="glass panel">
+        <div class="panel-head">
+          <div class="monthnav"><button class="icon" id="fm-prev" aria-label="上個月">‹</button><h3 id="fm-label"></h3><button class="icon" id="fm-next" aria-label="下個月">›</button></div>
+          <button class="primary" id="flow-add">＋ 記一筆</button>
+        </div>
+        <div class="stats" id="flow-sum"></div>
+      </div>
+      <div class="glass panel"><h3>支出分類</h3><div class="bars" id="flow-cats"></div></div>
+      <div class="glass panel"><h3>明細 <span class="muted" id="flow-count"></span></h3><div id="flow-list"></div></div>
+    </div>
   </section>
 </div>
 
@@ -129,6 +153,21 @@
     <label class="chk"><input name="liability" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>這是負債（貸款、卡費…）</span></label>
     <label>備註<input name="note" autocomplete="off"></label>
     <p id="err" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
+  </form>
+</dialog>
+
+<dialog id="fdlg" class="glass">
+  <form method="dialog" id="fform">
+    <h3>記一筆</h3>
+    <div class="seg" id="f-kind"><button type="button" data-k="out" class="on">支出</button><button type="button" data-k="in">收入</button></div>
+    <label>日期<input name="date" placeholder="YYYY-MM-DD" required autocomplete="off"></label>
+    <div class="two">
+      <label>金額（NT$）<input name="amount" type="number" min="0" step="any" required></label>
+      <div class="field">類別<div class="dd" id="ff-cat"></div></div>
+    </div>
+    <label>備註<input name="note" autocomplete="off"></label>
+    <p id="ferr" class="neg"></p>
     <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
   </form>
 </dialog>
@@ -184,7 +223,12 @@
     <div class="desk-only" hidden>
       <h4>版本</h4>
       <div class="row"><span id="ver" class="muted"></span><button type="button" id="upd-btn">檢查更新</button></div>
+      <p class="hint" id="upd-status"></p>
     </div>
+
+    <h4>備份與還原</h4>
+    <div class="row"><span class="muted">完整備份（JSON）</span><div class="btns"><button type="button" id="backup-btn">匯出備份</button><button type="button" id="restore-btn">還原備份</button></div></div>
+    <input type="file" id="restore-file" accept=".json,application/json" hidden>
 
     <p id="serr" class="neg"></p>
     <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
@@ -204,11 +248,11 @@
   <form method="dialog">
     <h3 id="cmsg">確定刪除？</h3>
     <p class="muted" id="csub"></p>
-    <menu><button value="cancel">取消</button><button value="ok" class="danger">刪除</button></menu>
+    <menu><button value="cancel">取消</button><button value="ok" class="danger" id="cok">刪除</button></menu>
   </form>
 </dialog>
 
-<div id="toast" class="glass" hidden></div>
+<div id="toast" class="glass" popover="manual"></div>
 <script src="main.js"></script>
 </body>
 </html>
