@@ -16,11 +16,11 @@ const store = {
 };
 
 /* ---------- backend access: Tauri IPC on the desktop, HTTP+PIN from a LAN browser ---------- */
-const isTauri = !!(window.__TAURI__ && window.__TAURI__.core);
+const inTauri = !!(window.__TAURI__ && window.__TAURI__.core);
 let token = store.get("token", "");
 
 async function invoke(cmd, args = {}) {
-  if (isTauri) return window.__TAURI__.core.invoke("call", { cmd, args });
+  if (inTauri) return window.__TAURI__.core.invoke("call", { cmd, args });
   for (;;) {
     let r;
     try {
@@ -775,7 +775,7 @@ async function openSettings() {
   $("new-code").value = $("new-rate").value = "";
   $("serr").textContent = "";
   sdlg.showModal();
-  if (isTauri) {
+  if (inTauri) {
     try {
       $("ver").textContent = "目前版本 v" + (await window.__TAURI__.core.invoke("app_version"));
       showSyncInfo(await invoke("get_sync"));
@@ -799,7 +799,7 @@ sform.onsubmit = async (e) => {
     rates[code] = parseFloat($("new-rate").value) || 0;
   }
   try {
-    if (isTauri && syncLoaded) {
+    if (inTauri && syncLoaded) {
       const on = $("sync-on").checked, port = parseInt($("sync-port").value, 10) || 8787;
       let pin = $("sync-pin").value.trim();
       if (on && !pin) pin = String(Math.floor(100000 + Math.random() * 900000));
@@ -843,7 +843,7 @@ $("refresh-btn").onclick = () => doRefresh(true);
 function scheduleRefresh() {
   clearInterval(refreshTimer);
   // Only the desktop app drives quote refresh; LAN browsers just pick up the results via polling.
-  if (isTauri && data.refresh_min > 0) refreshTimer = setInterval(() => doRefresh(false), data.refresh_min * 60000);
+  if (inTauri && data.refresh_min > 0) refreshTimer = setInterval(() => doRefresh(false), data.refresh_min * 60000);
 }
 
 // Pick up changes made on another device (and quote refreshes) without clobbering an open dialog.
@@ -884,7 +884,7 @@ $("import-file").onchange = async (e) => {
 
 /* ---------- auto update (desktop only) ---------- */
 async function checkUpdate(manual) {
-  if (!isTauri) return;
+  if (!inTauri) return;
   try {
     const u = await window.__TAURI__.core.invoke("check_update");
     if (u) {
@@ -910,16 +910,16 @@ $("update-now").onclick = async () => {
 $("upd-btn").onclick = () => checkUpdate(true);
 
 /* ---------- boot ---------- */
-document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !isTauri));
+document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !inTauri));
 invoke("get_data")
   .then((d) => {
     data = d;
     render();
     scheduleRefresh();
-    if (isTauri && data.refresh_min > 0) doRefresh(false);
+    if (inTauri && data.refresh_min > 0) doRefresh(false);
   })
   .catch((err) => toast(String(err)));
-if (isTauri) {
+if (inTauri) {
   setTimeout(() => checkUpdate(false), 4000);
   setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
 }
