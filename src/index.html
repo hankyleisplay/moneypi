@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MoneyPi 資產追蹤</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>MoneyPi</h1>
+  <button id="add-btn" class="primary">＋ 新增項目</button>
+</header>
+
+<section class="cards">
+  <div class="card"><span>淨資產</span><strong id="net">-</strong><small id="net-delta"></small></div>
+  <div class="card"><span>總資產</span><strong id="assets">-</strong></div>
+  <div class="card"><span>總負債</span><strong id="liab" class="neg">-</strong></div>
+</section>
+
+<section class="charts">
+  <div class="panel"><h2>淨資產走勢</h2><canvas id="trend" width="560" height="220"></canvas></div>
+  <div class="panel"><h2>資產配置</h2><canvas id="alloc" width="300" height="220"></canvas><ul id="legend"></ul></div>
+</section>
+
+<section class="panel">
+  <h2>項目明細</h2>
+  <table>
+    <thead><tr><th>名稱</th><th>類別</th><th class="r">金額</th><th>更新</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p id="empty" class="muted" hidden>尚無項目，按右上角「新增項目」開始記錄。</p>
+</section>
+
+<dialog id="dlg">
+  <form method="dialog" id="form">
+    <h3 id="dlg-title">新增項目</h3>
+    <label>名稱<input name="name" required></label>
+    <label>類別
+      <select name="category">
+        <option>現金</option><option>銀行存款</option><option>股票</option><option>基金/ETF</option>
+        <option>加密貨幣</option><option>不動產</option><option>保險</option><option>其他</option>
+      </select>
+    </label>
+    <label>金額<input name="value" type="number" min="0" step="any" required></label>
+    <label class="inline"><input name="liability" type="checkbox"> 這是負債（貸款、卡費…）</label>
+    <label>備註<input name="note"></label>
+    <p id="err" class="neg"></p>
+    <menu>
+      <button type="button" id="cancel">取消</button>
+      <button type="submit" class="primary">儲存</button>
+    </menu>
+  </form>
+</dialog>
+<script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+:root{--bg:#f5f6f8;--fg:#1c1f26;--card:#fff;--line:#e3e6eb;--muted:#6b7280;--accent:#2563eb;--neg:#dc2626;--pos:#16a34a}
+@media (prefers-color-scheme:dark){:root{--bg:#14161a;--fg:#e8eaee;--card:#1e2128;--line:#2c313b;--muted:#9aa2b1;--accent:#5b8def;--neg:#f07178;--pos:#4ade80}}
+*{box-sizing:border-box}
+body{margin:0;padding:20px 24px;background:var(--bg);color:var(--fg);font:14px/1.5 "Microsoft JhengHei",system-ui,sans-serif}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+h1{margin:0;font-size:22px} h2{margin:0 0 10px;font-size:15px}
+button{font:inherit;padding:7px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.link{border:0;background:none;color:var(--accent);padding:2px 6px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px}
+.card,.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.card span{color:var(--muted)} .card strong{display:block;font-size:26px}
+.card small{color:var(--muted)}
+.charts{display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:12px}
+canvas{width:100%;height:auto;max-height:220px}
+#legend{list-style:none;margin:8px 0 0;padding:0;font-size:12px;display:flex;flex-wrap:wrap;gap:4px 12px}
+#legend i{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left}
+th{color:var(--muted);font-weight:500} .r{text-align:right} td.r{font-variant-numeric:tabular-nums}
+.neg{color:var(--neg)} .pos{color:var(--pos)} .muted{color:var(--muted)}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--fg);padding:20px;width:360px}
+dialog::backdrop{background:#0006}
+form label{display:block;margin:10px 0 0;color:var(--muted)}
+form input:not([type=checkbox]),form select{display:block;width:100%;margin-top:3px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}
+label.inline{display:flex;align-items:center;gap:6px} menu{display:flex;justify-content:flex-end;gap:8px;padding:0;margin:14px 0 0}
+@media (max-width:760px){.cards,.charts{grid-template-columns:1fr}}
