@@ -20,7 +20,7 @@
 <div class="app" id="app">
   <aside class="glass side" id="side">
     <div class="side-head">
-      <div class="brand"><span class="logo">π</span><h1>MoneyPi</h1></div>
+      <div class="brand"><img class="logo" src="icon-192.png" alt="" width="34" height="34"><h1>MoneyPi</h1></div>
       <button class="icon" id="collapse-btn" title="收合清單" aria-label="收合清單">
         <svg viewBox="0 0 24 24" width="16" height="16"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
@@ -193,6 +193,8 @@
       <label id="t-price-wrap"><span id="t-price-label">單價／淨值</span><input name="price" type="number" min="0" step="any" required></label>
     </div>
     <label id="t-fee-wrap">手續費<input name="fee" type="number" min="0" step="any" placeholder="0"></label>
+    <div class="field">資金來源<div class="dd" id="t-cash"></div></div>
+    <p class="hint" id="t-cash-hint"></p>
     <label>備註<input name="note" autocomplete="off"></label>
     <p id="terr" class="neg"></p>
     <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
@@ -220,6 +222,9 @@
       <div class="row"><span id="ver" class="muted"></span><button type="button" id="upd-btn">檢查更新</button></div>
       <p class="hint" id="upd-status"></p>
     </div>
+
+    <h4>關於</h4>
+    <p class="hint">MoneyPi 由 hankyleisplay 製作，以 GPL-3.0 授權釋出。專案與授權全文：github.com/hankyleisplay/moneypi。程式顯示的數字與預估僅供記帳參考，不構成投資建議。</p>
 
     <h4>備份與還原</h4>
     <div class="row"><span class="muted">完整備份（JSON）</span><div class="btns"><button type="button" id="backup-btn">匯出備份</button><button type="button" id="restore-btn">還原備份</button></div></div>

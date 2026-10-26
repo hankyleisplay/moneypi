@@ -308,3 +308,7 @@ input.invalid{border-color:var(--neg)!important;box-shadow:0 0 0 3px rgba(224,52
 #rm-body button.primary,#rm-body button.danger{justify-self:start}
 
 .btnrow{display:flex;gap:10px;flex-wrap:wrap}
+
+.cashtag{font-size:12px;color:var(--accent);margin-top:2px}
+#t-cash-hint{margin:-4px 0 6px}
+img.logo{background:none;border-radius:0;box-shadow:none;object-fit:contain;filter:drop-shadow(0 3px 6px rgba(70,80,200,.28))}

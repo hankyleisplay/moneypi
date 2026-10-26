@@ -40,6 +40,12 @@ struct Tx {
     fee: f64,
     #[serde(default)]
     note: String,
+    /// Id of the deposit/cash asset this trade was paid from / settled into; 0 = money outside the app.
+    #[serde(default)]
+    cash: u64,
+    /// Signed change applied to that cash asset (its own currency); set by the core, kept so a delete can undo it.
+    #[serde(default)]
+    cash_delta: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -640,13 +646,41 @@ impl Core {
         Ok(view(&d))
     }
 
-    fn add_tx(&self, id: u64, tx: Tx) -> Result<Value, String> {
+    fn add_tx(&self, id: u64, mut tx: Tx) -> Result<Value, String> {
         validate_tx(&tx)?;
+        tx.cash_delta = 0.0;
         let mut d = self.data.lock().unwrap();
-        let a = d.assets.iter_mut().find(|a| a.id == id).ok_or("找不到該項目")?;
-        if !a.holding {
+        let (cur, holding) = {
+            let a = d.assets.iter().find(|a| a.id == id).ok_or("找不到該項目")?;
+            (a.currency.clone(), a.holding)
+        };
+        if !holding {
             return Err("請先將此項目設為「持倉」".into());
         }
+        // Work out the effect on the chosen cash asset before touching anything.
+        let mut cash_change: Option<(u64, f64)> = None;
+        if tx.cash != 0 {
+            if tx.cash == id {
+                return Err("不能用該項目本身當作資金來源".into());
+            }
+            let c = d.assets.iter().find(|a| a.id == tx.cash).ok_or("找不到資金來源（存款）")?;
+            if c.holding || c.liability {
+                return Err("資金來源必須是一般資產（如銀行存款、現金）".into());
+            }
+            let gross = match tx.kind.as_str() {
+                "buy" => -(tx.units * tx.price + tx.fee),
+                "sell" => tx.units * tx.price - tx.fee,
+                _ => tx.price,
+            };
+            let rate = |code: &str| d.rates.get(code).copied().unwrap_or(1.0);
+            let delta = gross * rate(&cur) / rate(&c.currency);
+            if c.value + delta < -1e-9 {
+                return Err(format!("「{}」餘額不足（餘額 {:.2} {}，需要 {:.2}）", c.name, c.value, c.currency, -delta));
+            }
+            tx.cash_delta = delta;
+            cash_change = Some((c.id, delta));
+        }
+        let a = d.assets.iter_mut().find(|a| a.id == id).ok_or("找不到該項目")?;
         a.txs.push(tx);
         if !recompute(a) {
             a.txs.pop();
@@ -654,6 +688,12 @@ impl Core {
             return Err("賣出數量超過當時持有的單位數".into());
         }
         a.updated = today();
+        if let Some((cid, delta)) = cash_change {
+            if let Some(c) = d.assets.iter_mut().find(|a| a.id == cid) {
+                c.value = (c.value + delta).max(0.0);
+                c.updated = today();
+            }
+        }
         self.commit(&mut d)?;
         Ok(view(&d))
     }
@@ -671,6 +711,22 @@ impl Core {
             return Err("刪除後會造成後續賣出數量超過持有，請先刪除較晚的賣出".into());
         }
         a.updated = today();
+        // Undo the cash movement of this trade (if its cash asset still exists).
+        if removed.cash != 0 && removed.cash_delta != 0.0 {
+            if let Some(c) = d.assets.iter().find(|x| x.id == removed.cash) {
+                if c.value - removed.cash_delta < -1e-9 {
+                    let msg = format!("「{}」餘額不足，無法還原這筆交易的資金變動", c.name);
+                    let a = d.assets.iter_mut().find(|a| a.id == id).ok_or("找不到該項目")?;
+                    a.txs.insert(index, removed);
+                    recompute(a);
+                    return Err(msg);
+                }
+            }
+            if let Some(c) = d.assets.iter_mut().find(|x| x.id == removed.cash) {
+                c.value = (c.value - removed.cash_delta).max(0.0);
+                c.updated = today();
+            }
+        }
         self.commit(&mut d)?;
         Ok(view(&d))
     }
@@ -1384,7 +1440,7 @@ mod tests {
     use super::*;
 
     fn tx(date: &str, kind: &str, units: f64, price: f64, fee: f64) -> Tx {
-        Tx { date: date.into(), kind: kind.into(), units, price, fee, note: String::new() }
+        Tx { date: date.into(), kind: kind.into(), units, price, fee, ..Default::default() }
     }
 
     fn holding(txs: Vec<Tx>) -> Asset {
@@ -1491,6 +1547,55 @@ mod tests {
             tunnel: Mutex::new(None),
             auth_fail: Mutex::new((0, None)),
         }
+    }
+
+    #[test]
+    fn trades_can_be_paid_from_a_cash_asset_and_undone() {
+        let c = test_core();
+        let c = Core { path: std::env::temp_dir().join(format!("moneypi-test-{}.json", random_hex(4))), ..c };
+        {
+            let mut d = c.data.lock().unwrap();
+            d.rates.insert("USD".into(), 32.0);
+            d.assets = vec![
+                Asset { id: 1, name: "銀行".into(), category: "銀行存款".into(), currency: "TWD".into(), value: 10_000.0, ..Default::default() },
+                Asset { id: 2, name: "股".into(), category: "股票".into(), currency: "TWD".into(), holding: true, ..Default::default() },
+                Asset { id: 3, name: "美股".into(), category: "股票".into(), currency: "USD".into(), holding: true, ..Default::default() },
+            ];
+        }
+        let cash_of = |c: &Core| c.data.lock().unwrap().assets[0].value;
+        let mut t = tx("2026-01-01", "buy", 10.0, 500.0, 20.0);
+        t.cash = 1;
+        c.add_tx(2, t).unwrap();
+        assert_eq!(cash_of(&c), 4_980.0); // 10000 - (5000 + 20)
+        // not enough money left: rejected, nothing changes
+        let mut big = tx("2026-01-02", "buy", 100.0, 500.0, 0.0);
+        big.cash = 1;
+        assert!(c.add_tx(2, big).is_err());
+        assert_eq!((cash_of(&c), c.data.lock().unwrap().assets[1].txs.len()), (4_980.0, 1));
+        // spending outside the app leaves the deposit alone
+        c.add_tx(2, tx("2026-01-03", "buy", 1.0, 500.0, 0.0)).unwrap();
+        assert_eq!(cash_of(&c), 4_980.0);
+        // a USD trade is converted into the deposit's currency
+        let mut u = tx("2026-01-04", "buy", 2.0, 10.0, 0.0);
+        u.cash = 1;
+        c.add_tx(3, u).unwrap();
+        assert_eq!(cash_of(&c), 4_340.0); // 20 USD * 32
+        // selling pays back, a forged cash_delta is ignored
+        let mut s = tx("2026-02-01", "sell", 5.0, 600.0, 10.0);
+        s.cash = 1;
+        s.cash_delta = 1e9;
+        c.add_tx(2, s).unwrap();
+        assert_eq!(cash_of(&c), 7_330.0); // + 3000 - 10
+        // deleting the sale takes the money back; deleting the first buy returns it
+        c.delete_tx(2, 2).unwrap();
+        assert_eq!(cash_of(&c), 4_340.0);
+        c.delete_tx(2, 0).unwrap();
+        assert_eq!(cash_of(&c), 9_360.0);
+        // a non-cash asset cannot be the source
+        let mut bad = tx("2026-03-01", "buy", 1.0, 1.0, 0.0);
+        bad.cash = 3;
+        assert!(c.add_tx(2, bad).is_err());
+        let _ = fs::remove_file(&c.path);
     }
 
     #[test]

@@ -191,6 +191,7 @@ const fCat = new Dropdown($("f-cat"));
 const fCur = new Dropdown($("f-cur"));
 const fMkt = new Dropdown($("f-mkt"), () => updateHoldHint());
 const tKind = new Dropdown($("t-kind"), () => syncTxUI());
+const tCash = new Dropdown($("t-cash"), () => syncTxUI());
 fCat.setOptions(CATS, CATS[0]);
 fMkt.setOptions([
   { value: "", label: "手動輸入價格" },
@@ -471,6 +472,12 @@ function renderList() {
 
 const KIND = { buy: "買入", sell: "賣出", div: "配息" };
 
+function cashTag(t) {
+  if (!t.cash) return "";
+  const c = data.assets.find((x) => x.id === t.cash);
+  return `<div class="cashtag">${c ? `${esc(c.name)} ${t.cash_delta >= 0 ? "+" : "−"}${fmt.format(Math.abs(t.cash_delta))} ${esc(c.currency)}` : "已刪除的存款"}</div>`;
+}
+
 function holdingHtml(a) {
   const q = a.quantity, hasCost = a.cost > 0 && q > 0;
   const unreal = a.value - a.cost, pct = hasCost ? (unreal / a.cost) * 100 : 0;
@@ -499,7 +506,7 @@ function holdingHtml(a) {
         <td class="r ${m}">${t.kind === "div" ? "—" : fmt.format(t.price)}</td>
         <td class="r ${m}">${t.fee ? fmt.format(t.fee) : "—"}</td>
         <td class="r ${m}">${fmt.format(amt)}</td>
-        <td class="muted">${esc(t.note)}</td>
+        <td class="muted">${esc(t.note)}${cashTag(t)}</td>
         <td class="r"><button class="link danger" data-deltx="${i}">刪除</button></td></tr>`;
     })
     .join("");
@@ -840,10 +847,17 @@ const tdlg = $("tdlg"), tform = $("tform");
 let txAsset = null;
 
 function syncTxUI() {
-  const div = tKind.value === "div";
+  const div = tKind.value === "div", sell = tKind.value === "sell";
   $("t-units-wrap").hidden = $("t-fee-wrap").hidden = div;
   $("t-price-label").textContent = div ? "配息總額" : "單價／淨值";
+  const src = cashSources().find((a) => String(a.id) === tCash.value);
+  $("t-cash-hint").textContent = src
+    ? (tKind.value === "buy" ? `買入金額會從「${src.name}」扣除（目前 ${src.currency} ${fmt.format(src.value)}）。` : `${sell ? "賣出所得" : "配息"}會加到「${src.name}」。`)
+    : "不動用 App 內的存款，視為另外準備的資金，不影響其他資產。";
 }
+
+/* deposits / cash a trade can be paid from or settled into */
+const cashSources = () => data.assets.filter((a) => !a.holding && !a.liability && a.id !== txAsset?.id);
 
 function openTx(a) {
   txAsset = a;
@@ -851,6 +865,9 @@ function openTx(a) {
   $("terr").textContent = "";
   $("tdlg-title").textContent = `記錄交易 · ${a.name}`;
   tKind.setValue("buy");
+  const last = store.get("tx_cash", "0");
+  tCash.setOptions([{ value: "0", label: "外部資金（不動用 App 內存款）" },
+    ...cashSources().map((c) => ({ value: String(c.id), label: `${c.name}（${c.currency} ${fmt0.format(c.value)}）` }))], last);
   tform.date.value = todayStr();
   tform.price.value = a.price || "";
   syncTxUI();
@@ -871,8 +888,10 @@ tform.onsubmit = async (e) => {
         price: num(tform.price.value),
         fee: div ? 0 : num(tform.fee.value),
         note: tform.note.value.trim(),
+        cash: Number(tCash.value) || 0,
       },
     });
+    store.set("tx_cash", tCash.value);
     tdlg.close();
     render();
     toast("已記錄交易");
