@@ -472,6 +472,44 @@ function renderList() {
 
 const KIND = { buy: "買入", sell: "賣出", div: "配息" };
 
+/* ---------- ? tips ---------- */
+const TIPS = {
+  "淨資產": "總資產 − 總負債，也就是你真正擁有的錢。",
+  "現值": "這檔標的現在值多少錢 = 持有數量 × 現價／淨值。會隨股價每天變動，總資產加的是現值，不是成本。",
+  "持有數量": "目前持有的股數或單位數，由你記錄的買入、賣出自動算出。",
+  "現價／淨值": "最新報價。有設定行情代號的，按上方「同步股價」會自動更新；沒設定的要自己改。",
+  "平均成本": "每一股平均花了多少錢（含手續費）。多次買入用加權平均計算。",
+  "總成本": "你實際投入、而且目前還持有的這些股數花的總金額（含手續費）。賣掉一部分，成本會按比例減少。",
+  "未實現損益": "現值 − 總成本。還沒賣出，所以只是帳面上的賺賠；下面的百分比 = 損益 ÷ 總成本。",
+  "已實現損益": "已經賣出的部分，實際賺賠了多少（賣出金額 − 手續費 − 對應的成本）。",
+  "累計配息": "你記錄的配息總額。配息不改變持有數量，但會算進總報酬。",
+  "總報酬": "未實現損益 + 已實現損益 + 累計配息；百分比是占總成本的比例。",
+  "年化報酬率 (XIRR)": "依你每一筆買賣、配息的實際日期，換算成「一年」大約賺賠幾 %。交易跨度要滿 90 天才顯示，太短會被放大而失真。",
+  "持倉": "股票、ETF、基金的持有狀況。現值 = 數量 × 現價；數量與成本由「記錄交易」自動計算。",
+  "定期定額": "每月固定日期自動買入。每期會記成一筆買入交易，價格用扣款日當天（或之後第一個交易日）的收盤價；開始日期填過去會自動補上之前每一期。",
+  "價格走勢與預測": "用過去價格畫一條趨勢線往後延伸一年，淡色帶是歷史波動範圍。這只是統計外推，不是預測保證，也不構成投資建議。",
+  "資金來源": "買入的錢從哪裡來。選存款項目，MoneyPi 會從那個存款扣掉（賣出、配息則加回）；選外部資金就不動 App 內的存款。",
+};
+const tip = (k) => (TIPS[k] ? `<button type="button" class="qm" data-tip="${esc(k)}" aria-label="${esc(k)}說明">?</button>` : "");
+
+document.addEventListener("click", (e) => {
+  const el = $("tip");
+  if (el.contains(e.target)) return;
+  const q = e.target.closest(".qm[data-tip]");
+  if (!q) { if (el.matches(":popover-open")) el.hidePopover(); return; }
+  e.preventDefault();
+  e.stopPropagation();
+  if (el.matches(":popover-open")) el.hidePopover();
+  el.textContent = TIPS[q.dataset.tip] || "";
+  el.showPopover();
+  const r = q.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+  const x = Math.min(Math.max(r.left + r.width / 2 - w / 2, 8), innerWidth - w - 8);
+  const y = r.bottom + 8 + h < innerHeight - 8 ? r.bottom + 8 : Math.max(8, r.top - 8 - h);
+  el.style.left = x + "px";
+  el.style.top = y + "px";
+}, true);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("tip").matches(":popover-open")) $("tip").hidePopover(); });
+
 /* annualised money-weighted return from the real trade dates (null when it cannot be solved) */
 function xirr(a) {
   const f = a.txs.map((t) => ({
@@ -505,7 +543,7 @@ function fitTrend(pts) {
 
 function forecastCard(a) {
   return `<div class="glass detail" id="fc-card">
-    <div class="sect"><h3>價格走勢與預測</h3>
+    <div class="sect"><h3>價格走勢與預測${tip("價格走勢與預測")}</h3>
       <div class="seg" id="fc-seg">${FC_RANGES.map(([v, l]) => `<button type="button" data-r="${v}" class="${v === ui.fcRange ? "on" : ""}">${l}</button>`).join("")}</div></div>
     <canvas id="fc"></canvas>
     <div id="fc-sum" class="fc-sum"><p class="muted">載入歷史價格中…</p></div>
@@ -621,7 +659,7 @@ function plansCard(a) {
       <div class="btns"><button class="link" data-editplan="${p.id}">編輯</button><button class="link danger" data-delplan="${p.id}">刪除</button></div></div>`;
   }).join("");
   return `<div class="glass detail">
-    <div class="sect"><h3>定期定額 <span class="muted">(${ps.length})</span></h3><div class="btns"><button data-addplan>＋ 新增定期定額</button></div></div>
+    <div class="sect"><h3>定期定額${tip("定期定額")} <span class="muted">(${ps.length})</span></h3><div class="btns"><button data-addplan>＋ 新增定期定額</button></div></div>
     ${ps.length ? rows : '<p class="muted">每月固定日期自動買入。設定後 MoneyPi 會依當天收盤價自動記成買入交易，開始日期填過去也會自動補上之前每期。</p>'}
   </div>`;
 }
@@ -638,7 +676,7 @@ function holdingHtml(a) {
   const total = (hasCost ? unreal : 0) + a.realized + a.dividends;
   const m = mask(), cur = esc(a.currency);
   const tile = (k, v, cls = "", sub = "") =>
-    `<div class="stat ${cls}"><span>${k}</span><b class="${m}">${v}</b>${sub ? `<small class="${m}">${sub}</small>` : ""}</div>`;
+    `<div class="stat ${cls}"><span>${k}${tip(k)}</span><b class="${m}">${v}</b>${sub ? `<small class="${m}">${sub}</small>` : ""}</div>`;
   const tiles = [
     tile("持有數量", fmtQ.format(q)),
     tile("現價／淨值", `${cur} ${fmt.format(a.price)}`, "", a.market ? (a.price_updated ? `行情 ${esc(a.price_updated)}` : "尚未同步") : "手動"),
@@ -667,7 +705,7 @@ function holdingHtml(a) {
     .join("");
 
   return `<div class="glass detail">
-    <div class="sect"><h3>持倉</h3>
+    <div class="sect"><h3>持倉${tip("持倉")}</h3>
       <div class="btns">${a.market ? "<button data-sync>同步行情</button>" : ""}<button class="primary" data-addtx>＋ 記錄交易</button></div></div>
     <div class="stats">${tiles}</div>
   </div>
@@ -699,6 +737,7 @@ function renderView() {
       <div class="d-actions"><button data-edit>編輯</button><button class="danger" data-del>刪除</button></div>
     </div>
     <div class="d-amount ${a.liability ? "neg" : ""} ${mask()}">${sgn}${esc(a.currency)} ${fmt.format(a.value)}</div>
+    ${a.holding ? `<div class="d-cap muted">現值 = 持有數量 × 現價${tip("現值")}　（成本與損益在下方「持倉」）</div>` : ""}
     <div class="stats">
       <div class="stat"><span>折合 TWD</span><b class="${mask()}">${sgn}${fmt0.format(toBase(a))}</b></div>
       <div class="stat"><span>佔總${a.liability ? "負債" : "資產"}</span><b>${share.toFixed(1)}%</b></div>
@@ -865,7 +904,7 @@ function drawAlloc() {
   let a0 = -Math.PI / 2;
   g.lineWidth = lw; g.lineCap = "butt";
   items.forEach(([k, v]) => {
-    const sweep = (v / total) * Math.PI * 2, gap = items.length > 1 ? 0.03 : 0;
+    const sweep = (v / total) * Math.PI * 2, gap = items.length > 1 ? Math.min(0.03, sweep / 4) : 0; // a gap wider than the slice would flip the arc into a full circle
     g.strokeStyle = catColor(k);
     g.beginPath(); g.arc(cx, cy, r, a0 + gap, a0 + sweep - gap); g.stroke();
     a0 += sweep;
@@ -1145,6 +1184,75 @@ async function runPlans(announce) {
     if (r.added) toast(`定期定額已自動新增 ${r.added} 筆買入`);
   } catch (err) { if (announce) toast(String(err)); }
 }
+
+/* ---------- help + guided tour ---------- */
+$("help-btn").onclick = () => $("hdlg").showModal();
+$("h-tour").onclick = () => { $("hdlg").close(); setTimeout(startTour, 250); };
+
+const TOUR = [
+  { t: "歡迎使用 MoneyPi", d: "這是你的個人資產追蹤工具：記錄存款、股票、基金與負債，自動算出淨資產、損益，以及離目標還有多久。花 30 秒看一下怎麼用？" },
+  { sel: "#add-btn", t: "第 1 步：新增項目", d: "存款、現金、股票、ETF、基金、貸款都從這裡新增。存款填目前餘額；股票、基金請勾選「持倉」，再用「記錄交易」輸入買賣，成本與損益就會自動算出來。" },
+  { sel: "#list", t: "你的項目清單", d: "新增的項目會列在這裡，點一下看詳細：現值、成本、損益、交易記錄、定期定額和走勢預測。" },
+  { sel: "#nav-overview", t: "總覽", d: "看淨資產走勢、資產配置、投資組合與目標進度，也可以在這裡設定多個目標。" },
+  { sel: "#nav-flow", t: "記帳", d: "記錄每天的收入與支出，查看每月統計。" },
+  { sel: "#refresh-btn", t: "同步股價與匯率", d: "有設定行情代號的股票、ETF 會抓最新報價，外幣也會更新匯率。自動更新的間隔在「設定」裡調整。" },
+  { sel: "#hide-btn", t: "隱藏金額", d: "在公共場合想遮住數字，就按這裡。" },
+  { sel: "#phone-btn", t: "手機連線", d: "用手機查看同一份資料：同一個 Wi-Fi 掃 QR Code，或用「遠端」在外面也能連。" },
+  { sel: "#settings-btn", t: "設定", d: "匯率、自動更新、備份與還原、檢查更新都在這裡。" },
+  { sel: "#help-btn", t: "隨時看說明", d: "名詞旁邊有 ? 的，點一下就會解釋。完整教學在這個按鈕裡，也可以重新播放這個導覽。" },
+];
+let tourSteps = [], tourI = 0;
+const visibleEl = (sel) => {
+  const el = document.querySelector(sel);
+  if (!el || !el.offsetWidth || !el.offsetHeight) return null;
+  const r = el.getBoundingClientRect();
+  return r.right > 0 && r.left < innerWidth && r.bottom > 0 && r.top < innerHeight ? el : null;
+};
+function startTour() {
+  if (document.querySelector("dialog[open]")) return;
+  tourSteps = TOUR.filter((s) => !s.sel || visibleEl(s.sel));
+  tourI = 0;
+  $("tour").showPopover();
+  drawTour();
+}
+function endTour() {
+  store.set("toured", "1");
+  if ($("tour").matches(":popover-open")) $("tour").hidePopover();
+}
+function drawTour() {
+  const s = tourSteps[tourI], last = tourI === tourSteps.length - 1;
+  const el = s.sel ? visibleEl(s.sel) : null;
+  const card = $("tour-card"), hole = document.querySelector(".tour-hole");
+  card.innerHTML = `<h4>${s.t}</h4><p>${s.d}</p><div class="tour-foot"><span class="muted">${tourI + 1} / ${tourSteps.length}</span><span class="grow"></span>
+    ${last ? "" : "<button type=\"button\" data-tskip>略過</button>"}${tourI ? "<button type=\"button\" data-tprev>上一步</button>" : ""}<button type="button" class="primary" data-tnext>${last ? "完成" : "下一步"}</button></div>`;
+  const cw = card.offsetWidth, ch = card.offsetHeight, clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+  let x, y;
+  if (el) {
+    const r = el.getBoundingClientRect(), p = 6;
+    Object.assign(hole.style, { left: r.left - p + "px", top: r.top - p + "px", width: r.width + 2 * p + "px", height: r.height + 2 * p + "px" });
+    if (r.left < 200 && r.right + 14 + cw < innerWidth - 12) { x = r.right + 14 + p; y = clamp(r.top, 12, innerHeight - ch - 12); }
+    else {
+      x = clamp(r.left + r.width / 2 - cw / 2, 12, innerWidth - cw - 12);
+      y = r.bottom + 14 + ch < innerHeight - 12 ? r.bottom + 14 + p : Math.max(12, r.top - 14 - ch - p);
+    }
+  } else {
+    Object.assign(hole.style, { left: innerWidth / 2 + "px", top: innerHeight / 2 + "px", width: "0px", height: "0px" });
+    x = (innerWidth - cw) / 2;
+    y = (innerHeight - ch) / 2;
+  }
+  card.style.left = x + "px";
+  card.style.top = y + "px";
+}
+$("tour-card").onclick = (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.hasAttribute("data-tskip")) endTour();
+  else if (b.hasAttribute("data-tprev")) { tourI--; drawTour(); }
+  else if (tourI >= tourSteps.length - 1) endTour();
+  else { tourI++; drawTour(); }
+};
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("tour").matches(":popover-open")) endTour(); });
+addEventListener("resize", () => { if ($("tour").matches(":popover-open")) drawTour(); });
 
 /* ---------- settings dialog ---------- */
 const sdlg = $("sdlg"), sform = $("sform");
@@ -1668,7 +1776,7 @@ $("rm-body").onclick = async (e) => {
 // after installing MoneyPi, offer once to set up remote access (declining is fine; it can be done later)
 async function offerRemoteInstall() {
   if (!inTauri || store.get("remote_prompted", "0") === "1") return;
-  if (document.querySelector("dialog[open]")) return setTimeout(offerRemoteInstall, 30000);
+  if (document.querySelector("dialog[open]") || $("tour").matches(":popover-open")) return setTimeout(offerRemoteInstall, 30000);
   try {
     const s = await invoke("tunnel_status");
     store.set("remote_prompted", "1");
@@ -1754,6 +1862,7 @@ invoke("get_data")
     if (inTauri && data.refresh_min > 0) doRefresh(false);
     runPlans(false);
     setInterval(() => runPlans(false), 3600e3);
+    if (store.get("toured", "0") !== "1") setTimeout(startTour, 1200);
   })
   .catch((err) => toast(String(err)));
 if (inTauri) {

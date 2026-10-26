@@ -62,6 +62,7 @@
         <button class="icon desk-only" id="phone-btn" title="手機連線" aria-label="手機連線" hidden>
           <svg viewBox="0 0 24 24" width="17" height="17"><rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M11 18.5h2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
         </button>
+        <button class="icon" id="help-btn" title="說明與導覽" aria-label="說明與導覽"><b>?</b></button>
         <button class="icon" id="refresh-btn" title="同步股價與匯率" aria-label="同步股價與匯率">
           <svg viewBox="0 0 24 24" width="17" height="17"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -84,7 +85,7 @@
 
     <div id="view-overview" class="view">
       <section class="cards">
-        <div class="glass card hero"><span>淨資產</span><strong id="net">-</strong><small id="net-delta"></small></div>
+        <div class="glass card hero"><span>淨資產<button type="button" class="qm" data-tip="淨資產" aria-label="說明">?</button></span><strong id="net">-</strong><small id="net-delta"></small></div>
         <div class="glass card"><span>總資產</span><strong id="assets">-</strong></div>
         <div class="glass card"><span>總負債</span><strong id="liab" class="neg">-</strong><small id="debt-ratio"></small></div>
         <div class="glass card goal">
@@ -197,13 +198,88 @@
       <span class="hint" id="t-pick-msg"></span>
     </div>
     <label id="t-fee-wrap">手續費<input name="fee" type="number" min="0" step="any" placeholder="0"></label>
-    <div class="field">資金來源<div class="dd" id="t-cash"></div></div>
+    <div class="field">資金來源<button type="button" class="qm" data-tip="資金來源" aria-label="資金來源說明">?</button><div class="dd" id="t-cash"></div></div>
     <p class="hint" id="t-cash-hint"></p>
     <label>備註<input name="note" autocomplete="off"></label>
     <p id="terr" class="neg"></p>
     <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
   </form>
 </dialog>
+
+<dialog id="hdlg" class="glass">
+  <form method="dialog" id="hform">
+    <h3>說明與教學</h3>
+    <div class="btnrow"><button type="button" class="primary" id="h-tour">開始導覽（30 秒）</button></div>
+
+    <details open class="help"><summary>快速開始：4 個步驟</summary>
+      <ol>
+        <li>按左下「＋ 新增項目」，先把<b>存款、現金</b>加進來：類別選「銀行存款」或「現金」，金額填目前餘額。</li>
+        <li>要加<b>股票、ETF、基金</b>：同樣「＋ 新增項目」，類別選「股票」或「基金/ETF」，勾選<b>「持倉」</b>。台股「行情來源」選「台灣」並填代號（例如 0050、2330），數量與成本先留空。</li>
+        <li>點進那個項目，按「＋ 記錄交易」輸入買入（日期、股數、成交價、手續費）。每月固定買入的，改用下面的「定期定額」。</li>
+        <li>到總覽設定<b>目標</b>，MoneyPi 會依你資產成長的速度預估何時達成。</li>
+      </ol>
+    </details>
+
+    <details class="help"><summary>新增股票／ETF 時，成本要填在哪？</summary>
+      <p><b>建議用「記錄交易」：</b>每一筆買入都記日期、股數、成交價、手續費，MoneyPi 會自動算出持有數量、平均成本、總成本，也才算得出年化報酬率。</p>
+      <p>之前就買了、忘了當時價格？記錄交易時把日期改成買進那天，按「帶入這天的收盤價」就會填入當時的收盤價（實際成交價請以券商對帳單為準）。</p>
+      <p>勾選「持倉」後，新增視窗裡的「金額」欄會消失，因為<b>現值 = 持有數量 × 現價</b>，由程式自己算。只要記錄過任何一筆交易，數量與成本就完全由交易記錄計算，新增視窗裡的「總成本」欄不再採用。</p>
+    </details>
+
+    <details class="help"><summary>畫面上的數字是什麼意思？</summary>
+      <dl>
+        <dt>現值（頁面最上面的大數字）</dt><dd>持有數量 × 現價，現在值多少錢，會隨股價變動。總資產加的是現值。</dd>
+        <dt>總成本／平均成本</dt><dd>你實際花的錢（含手續費）。平均成本 = 總成本 ÷ 持有數量。</dd>
+        <dt>未實現損益</dt><dd>現值 − 總成本。還沒賣掉，所以只是帳面賺賠。</dd>
+        <dt>已實現損益</dt><dd>已經賣出的部分實際賺賠多少。</dd>
+        <dt>累計配息</dt><dd>你記錄的配息總額，計入總報酬。</dd>
+        <dt>年化報酬率 (XIRR)</dt><dd>依真實買賣日期，換算成一年約賺賠幾 %。交易跨度滿 90 天才顯示。</dd>
+        <dt>淨資產</dt><dd>總資產 − 總負債。</dd>
+      </dl>
+      <p class="hint">頁面上有 <span class="qm static">?</span> 的名詞，點一下就會看到解釋。</p>
+    </details>
+
+    <details class="help"><summary>定期定額怎麼設定？</summary>
+      <p>進到那檔標的的詳細頁，往下找「定期定額」，按「＋ 新增定期定額」，填每期扣款金額、每月扣款日、手續費、開始日期。</p>
+      <p>每期會自動記成一筆買入，價格是扣款日當天（或之後第一個交易日）的收盤價。<b>開始日期可以填過去</b>，之前每一期會自動補上。</p>
+      <p>扣款金額包含手續費，台股勾選「只買整股」會把零頭捨去。手續費不確定可先填 1（台股零股最低 1 元）或留空。</p>
+    </details>
+
+    <details class="help"><summary>「資金來源」要選哪一個？</summary>
+      <p><b>選存款項目：</b>買入時 MoneyPi 會自動從那個存款扣錢（賣出、配息則加回去），總資產不會因為買股票而重複計算。</p>
+      <p><b>選外部資金：</b>不動 App 內的存款。如果你的存款餘額是「已經扣過買股票的錢」的現況，請選這個，才不會重複扣。</p>
+      <p>刪除一筆交易時，被扣的存款會自動還回去。</p>
+    </details>
+
+    <details class="help"><summary>目標與預估達成時間</summary>
+      <p>目標可以有很多個（財富自由、買車…），可以看總淨資產，也可以只算指定的幾個項目。</p>
+      <p>預估時間是依你最近資產成長的速度推算的，需要累積幾天的紀錄才算得出來；填了目標日期，還會告訴你趕不趕得上。</p>
+    </details>
+
+    <details class="help"><summary>價格走勢與預測可信嗎？</summary>
+      <p>走勢圖的預測是用過去價格畫一條趨勢線往後延伸，淡色帶是歷史波動範圍。這只是統計外推，<b>不是預測保證，也不構成投資建議</b>。趨勢吻合度（R²）越低，參考性越低。</p>
+    </details>
+
+    <details class="help"><summary>手機連線（區域網路／遠端）</summary>
+      <p><b>區域網路：</b>電腦和手機在同一個 Wi-Fi，掃描 QR Code 即可。<b>遠端：</b>不限網路，需要 cloudflared 工具，MoneyPi 會詢問並協助安裝；每次開啟都是新網址與新密鑰，請用 QR Code 或「複製連結」，只輸入網址無法連線。</p>
+    </details>
+
+    <details class="help"><summary>常見問題</summary>
+      <dl>
+        <dt>股價沒更新？</dt><dd>確認項目有填代號與行情來源，再按上方「同步股價與匯率」。</dd>
+        <dt>為什麼沒有年化報酬率？</dt><dd>需要有買入記錄，且從第一筆到現在滿 90 天。</dd>
+        <dt>怎麼備份？</dt><dd>「設定 → 備份與還原」。重要資料請定期備份。</dd>
+        <dt>資料存在哪？</dt><dd>只存在你的電腦（%APPDATA%\com.moneypi.app），不會上傳。使用遠端連線時資料才會暫時經過 Cloudflare。</dd>
+      </dl>
+    </details>
+
+    <p class="hint">MoneyPi 由 hankyleisplay 製作，GPL-3.0 授權。顯示的數字與預估僅供記帳參考，不構成投資建議。</p>
+    <menu><button type="button" data-close>關閉</button></menu>
+  </form>
+</dialog>
+
+<div id="tip" popover="manual" class="glass" role="tooltip"></div>
+<div id="tour" popover="manual"><div class="tour-hole"></div><div class="tour-card glass" id="tour-card"></div></div>
 
 <dialog id="pldlg" class="glass">
   <form method="dialog" id="plform">
@@ -218,7 +294,7 @@
       <label>結束日期（可留空）<input name="end" placeholder="YYYY-MM-DD" autocomplete="off"></label>
     </div>
     <label class="chk"><input name="whole" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>只買整股／整單位（台股定期定額，未滿的不買）</span></label>
-    <div class="field">資金來源<div class="dd" id="pl-cash"></div></div>
+    <div class="field">資金來源<button type="button" class="qm" data-tip="資金來源" aria-label="資金來源說明">?</button><div class="dd" id="pl-cash"></div></div>
     <p class="hint" id="pl-hint"></p>
     <p class="hint">開始日期可以填過去：之前每一期會用當天（或之後第一個交易日）的收盤價自動補上買入。若存款餘額是「已經扣過」的現況，請選「外部資金」以免重複扣款。</p>
     <p id="plerr" class="neg"></p>
