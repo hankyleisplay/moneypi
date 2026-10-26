@@ -192,6 +192,10 @@
       <label id="t-units-wrap">單位數<input name="units" type="number" min="0" step="any"></label>
       <label id="t-price-wrap"><span id="t-price-label">單價／淨值</span><input name="price" type="number" min="0" step="any" required></label>
     </div>
+    <div class="pickrow" id="t-pick-row" hidden>
+      <button type="button" id="t-pick">帶入這天的收盤價</button>
+      <span class="hint" id="t-pick-msg"></span>
+    </div>
     <label id="t-fee-wrap">手續費<input name="fee" type="number" min="0" step="any" placeholder="0"></label>
     <div class="field">資金來源<div class="dd" id="t-cash"></div></div>
     <p class="hint" id="t-cash-hint"></p>

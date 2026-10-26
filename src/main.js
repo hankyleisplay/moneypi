@@ -69,7 +69,7 @@ function askPin(msg) {
 
 let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_min: 0, cashflow: [] };
 const ui = {
-  kind: "all", cat: "", q: "", sort: "value", range: 0, sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
+  kind: "all", cat: "", q: "", sort: "value", range: 0, fcRange: "1y", sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
   hidden: store.get("hidden", "0") === "1",
 };
 
@@ -472,6 +472,140 @@ function renderList() {
 
 const KIND = { buy: "買入", sell: "賣出", div: "配息" };
 
+/* annualised money-weighted return from the real trade dates (null when it cannot be solved) */
+function xirr(a) {
+  const f = a.txs.map((t) => ({
+    t: Date.parse(t.date + "T00:00:00Z"),
+    v: t.kind === "buy" ? -(t.units * t.price + t.fee) : t.kind === "sell" ? t.units * t.price - t.fee : t.price,
+  })).sort((x, y) => x.t - y.t);
+  if (a.value > 0) f.push({ t: Date.now(), v: a.value });
+  if (!f.some((x) => x.v < 0) || !f.some((x) => x.v > 0) || f.at(-1).t - f[0].t < 30 * DAY) return null;
+  const npv = (r) => f.reduce((s, c) => s + c.v / Math.pow(1 + r, (c.t - f[0].t) / (365 * DAY)), 0);
+  let lo = -0.99, hi = 20;
+  if (npv(lo) * npv(hi) > 0) return null;
+  for (let i = 0; i < 120; i++) {
+    const mid = (lo + hi) / 2;
+    if (npv(lo) * npv(mid) <= 0) hi = mid; else lo = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/* ---- price history + trend extrapolation (log-linear regression) ---- */
+const fcCache = new Map();
+const FC_RANGES = [["1y", "1 年"], ["2y", "2 年"], ["5y", "5 年"]];
+function fitTrend(pts) {
+  const x = pts.map((p) => Date.parse(p[0] + "T00:00:00Z") / DAY), y = pts.map((p) => Math.log(p[1]));
+  const n = x.length, mx = x.reduce((s, v) => s + v, 0) / n, my = y.reduce((s, v) => s + v, 0) / n;
+  let sxx = 0, sxy = 0, syy = 0;
+  x.forEach((v, i) => { sxx += (v - mx) ** 2; sxy += (v - mx) * (y[i] - my); syy += (y[i] - my) ** 2; });
+  const b = sxx ? sxy / sxx : 0, c = my - b * mx;
+  const sse = y.reduce((s, v, i) => s + (v - (c + b * x[i])) ** 2, 0);
+  return { b, c, sigma: Math.sqrt(sse / Math.max(1, n - 2)), r2: syy ? 1 - sse / syy : 0, x0: x[0], x1: x[n - 1] };
+}
+
+function forecastCard(a) {
+  return `<div class="glass detail" id="fc-card">
+    <div class="sect"><h3>價格走勢與預測</h3>
+      <div class="seg" id="fc-seg">${FC_RANGES.map(([v, l]) => `<button type="button" data-r="${v}" class="${v === ui.fcRange ? "on" : ""}">${l}</button>`).join("")}</div></div>
+    <canvas id="fc"></canvas>
+    <div id="fc-sum" class="fc-sum"><p class="muted">載入歷史價格中…</p></div>
+  </div>`;
+}
+
+async function loadForecast(a) {
+  const key = a.id + ":" + ui.fcRange;
+  let s = fcCache.get(key);
+  try {
+    if (!s || Date.now() - s.at > 3600e3) {
+      s = { at: Date.now(), ...(await invoke("price_history", { id: a.id, range: ui.fcRange })) };
+      fcCache.set(key, s);
+    }
+  } catch (err) {
+    if ($("fc-sum") && ui.sel === a.id) { $("fc-sum").innerHTML = `<p class="muted">無法取得歷史價格：${esc(String(err))}</p>`; $("fc").style.display = "none"; }
+    return;
+  }
+  if (ui.sel !== a.id || !$("fc")) return;
+  $("fc").style.display = "";
+  drawForecast(a, s);
+}
+
+function drawForecast(a, s) {
+  const pts = s.points, fit = fitTrend(pts), HOR = 365;
+  const { g, W, H } = setupCanvas($("fc"));
+  const padL = ui.hidden ? 12 : 58, padR = 12, padT = 12, padB = 24;
+  const day = (d) => Date.parse(d + "T00:00:00Z") / DAY;
+  const t0 = fit.x0, t1 = fit.x1 + HOR;
+  const trend = (t) => Math.exp(fit.c + fit.b * t);
+  const hi = (t) => trend(t) * Math.exp(fit.sigma), lo = (t) => trend(t) * Math.exp(-fit.sigma);
+  const avg = a.quantity > 0 && a.cost > 0 ? a.cost / a.quantity : null;
+  let min = Math.min(...pts.map((p) => p[1]), lo(t1)), max = Math.max(...pts.map((p) => p[1]), hi(t1));
+  if (avg) { min = Math.min(min, avg); max = Math.max(max, avg); }
+  const X = (t) => padL + ((t - t0) / (t1 - t0)) * (W - padL - padR);
+  const Y = (v) => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
+  g.font = "11px 'Segoe UI Variable', sans-serif";
+  g.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const v = min + ((max - min) * i) / 3, yy = Y(v);
+    g.strokeStyle = css("--line"); g.beginPath(); g.moveTo(padL, yy); g.lineTo(W - padR, yy); g.stroke();
+    if (!ui.hidden) { g.fillStyle = css("--muted"); g.textAlign = "left"; g.fillText(fmt.format(v), 2, yy + 3); }
+  }
+  const accent = css("--accent"), nowX = X(fit.x1);
+  // forecast band + trend line (future part)
+  g.fillStyle = accent + "22";
+  g.beginPath(); g.moveTo(nowX, Y(hi(fit.x1)));
+  for (let t = fit.x1; t <= t1; t += 5) g.lineTo(X(t), Y(hi(t)));
+  g.lineTo(X(t1), Y(hi(t1)));
+  g.lineTo(X(t1), Y(lo(t1)));
+  for (let t = t1; t >= fit.x1; t -= 5) g.lineTo(X(t), Y(lo(t)));
+  g.closePath(); g.fill();
+  g.setLineDash([6, 5]); g.strokeStyle = accent; g.lineWidth = 1.8;
+  g.beginPath(); g.moveTo(X(t0), Y(trend(t0))); g.lineTo(X(t1), Y(trend(t1))); g.stroke();
+  g.setLineDash([]);
+  g.strokeStyle = "rgba(90,105,160,.4)"; g.beginPath(); g.moveTo(nowX, padT); g.lineTo(nowX, H - padB); g.stroke();
+  // actual closes
+  g.strokeStyle = "#1b2340"; g.lineWidth = 1.6; g.lineJoin = "round";
+  g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(X(day(p[0])), Y(p[1])) : g.moveTo(X(day(p[0])), Y(p[1])))); g.stroke();
+  // my average cost
+  if (avg) {
+    g.setLineDash([3, 4]); g.strokeStyle = "#f59e0b"; g.lineWidth = 1.5;
+    g.beginPath(); g.moveTo(padL, Y(avg)); g.lineTo(W - padR, Y(avg)); g.stroke(); g.setLineDash([]);
+    g.fillStyle = "#b45309"; g.textAlign = "right"; g.fillText("我的平均成本", W - padR, Y(avg) - 4);
+  }
+  // my trades
+  const at = (d) => { let v = null; for (const p of pts) { if (p[0] <= d) v = p[1]; else break; } return v; };
+  a.txs.filter((t) => t.kind !== "div" && t.date >= pts[0][0]).forEach((t) => {
+    const v = at(t.date); if (v == null) return;
+    const x = X(day(t.date)), y = Y(v), up = t.kind === "buy";
+    g.fillStyle = up ? "#12935a" : "#e0475b";
+    g.beginPath();
+    if (up) { g.moveTo(x, y - 3); g.lineTo(x - 5, y + 7); g.lineTo(x + 5, y + 7); } else { g.moveTo(x, y + 3); g.lineTo(x - 5, y - 7); g.lineTo(x + 5, y - 7); }
+    g.closePath(); g.fill();
+  });
+  g.fillStyle = css("--muted"); g.textAlign = "left"; g.fillText(pts[0][0], padL, H - 6);
+  g.textAlign = "center"; g.fillText("今天", nowX, H - 6);
+  g.textAlign = "right"; g.fillText("＋1 年", W - padR, H - 6);
+
+  const last = pts.at(-1)[1], yr = Math.exp(fit.b * 365) - 1, m = mask();
+  const p1 = trend(fit.x1 + HOR), cur = esc(s.currency || a.currency);
+  const mine = a.value * Math.exp(fit.b * 365);
+  const weak = fit.r2 < 0.3 ? "走勢起伏大、不太像一條直線，外推的參考性低。" : fit.r2 < 0.6 ? "走勢與直線趨勢的吻合度普通。" : "";
+  $("fc-sum").innerHTML = `<div class="stats">
+      <div class="stat"><span>期間歷史趨勢（年化）</span><b class="${yr >= 0 ? "pos" : "neg"}">${signed(yr * 100, fmt)}%</b></div>
+      <div class="stat"><span>一年後趨勢價</span><b class="${m}">${cur} ${fmt.format(p1)}</b><small class="${m}">${fmt.format(lo(fit.x1 + HOR))} ～ ${fmt.format(hi(fit.x1 + HOR))}</small></div>
+      <div class="stat"><span>你的持倉一年後約</span><b class="${m}">${a.currency} ${fmt0.format(mine)}</b><small class="${m}">目前 ${fmt0.format(a.value)}</small></div>
+      <div class="stat"><span>趨勢吻合度 R²</span><b>${fit.r2.toFixed(2)}</b></div>
+    </div>
+    <p class="hint">依這段期間的價格走勢畫出直線趨勢往後延伸，淡色帶是歷史波動範圍（±1 個標準差）。${weak}這只是統計外推，<b>不是預測保證，也不構成投資建議</b>；▲買入 ▼賣出為你的記錄。收盤 ${fmt.format(last)} ${cur}（${esc(pts.at(-1)[0])}）。</p>`;
+}
+
+$("view-detail").addEventListener("click", (e) => {
+  const b = e.target.closest("#fc-seg button");
+  if (!b) return;
+  ui.fcRange = b.dataset.r;
+  const a = data.assets.find((x) => x.id === ui.sel);
+  if (a) { [...$("fc-seg").children].forEach((x) => x.classList.toggle("on", x === b)); loadForecast(a); }
+});
+
 function cashTag(t) {
   if (!t.cash) return "";
   const c = data.assets.find((x) => x.id === t.cash);
@@ -493,6 +627,7 @@ function holdingHtml(a) {
     hasCost ? tile("未實現損益", `${signed(unreal)} ${cur}`, unreal >= 0 ? "up" : "down", `${signed(pct, fmt)}%`) : "",
     a.txs.length ? tile("已實現損益", `${signed(a.realized)} ${cur}`, a.realized >= 0 ? "up" : "down") : "",
     a.dividends > 0 ? tile("累計配息", `${cur} ${fmt0.format(a.dividends)}`, "up") : "",
+    (() => { const r = xirr(a); return r == null ? "" : tile("年化報酬率 (XIRR)", `${signed(r * 100, fmt)}%`, r >= 0 ? "up" : "down", "依實際買賣日期"); })(),
     hasCost && (a.realized || a.dividends) ? tile("總報酬", `${signed(total)} ${cur}`, total >= 0 ? "up" : "down", `${signed((total / a.cost) * 100, fmt)}%`) : "",
   ].join("");
 
@@ -520,8 +655,8 @@ function holdingHtml(a) {
     <div class="sect"><h3>交易記錄 <span class="muted">(${a.txs.length})</span></h3></div>
     ${a.txs.length
       ? `<div class="tx-wrap"><table class="tx"><thead><tr><th>日期</th><th>類型</th><th class="r">單位</th><th class="r">單價</th><th class="r">手續費</th><th class="r">金額</th><th>備註</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
-      : '<p class="muted">尚無交易記錄。記錄買入／賣出／配息後，數量、平均成本與損益會自動計算。</p>'}
-  </div>`;
+      : '<p class="muted">尚無交易記錄。記錄買入／賣出／配息後，數量、平均成本與損益會自動計算。已經持有很久？按「記錄交易」，把日期改成當初買進那天，就能用當時的價格算出真實損益。</p>'}
+  </div>${a.market ? forecastCard(a) : ""}`;
 }
 
 function renderView() {
@@ -552,6 +687,7 @@ function renderView() {
       <div class="stat"><span>備註</span><b>${a.note ? esc(a.note) : "—"}</b></div>
     </div>
   </div>${a.holding ? holdingHtml(a) : ""}`;
+  if (a.holding && a.market) loadForecast(a);
 }
 
 function select(id) {
@@ -850,6 +986,7 @@ function syncTxUI() {
   const div = tKind.value === "div", sell = tKind.value === "sell";
   $("t-units-wrap").hidden = $("t-fee-wrap").hidden = div;
   $("t-price-label").textContent = div ? "配息總額" : "單價／淨值";
+  $("t-pick-row").hidden = div || !txAsset?.market;
   const src = cashSources().find((a) => String(a.id) === tCash.value);
   $("t-cash-hint").textContent = src
     ? (tKind.value === "buy" ? `買入金額會從「${src.name}」扣除（目前 ${src.currency} ${fmt.format(src.value)}）。` : `${sell ? "賣出所得" : "配息"}會加到「${src.name}」。`)
@@ -870,10 +1007,21 @@ function openTx(a) {
     ...cashSources().map((c) => ({ value: String(c.id), label: `${c.name}（${c.currency} ${fmt0.format(c.value)}）` }))], last);
   tform.date.value = todayStr();
   tform.price.value = a.price || "";
+  $("t-pick-msg").textContent = "之前就買了？把日期改成買進那天，再按左邊的鈕帶入當時收盤價（實際成交價請以對帳單為準）。";
   syncTxUI();
   tdlg.showModal();
   tform.units.focus();
 }
+
+$("t-pick").onclick = async () => {
+  const date = tform.date.value.trim(), msg = $("t-pick-msg");
+  msg.textContent = "查詢中…";
+  try {
+    const r = await invoke("price_on", { id: txAsset.id, date });
+    tform.price.value = r.price;
+    msg.textContent = `已帶入 ${r.date} 收盤價 ${fmt.format(r.price)} ${r.currency}${r.date !== date ? "（當天休市，取前一個交易日）" : ""}`;
+  } catch (err) { msg.textContent = String(err); }
+};
 
 tform.onsubmit = async (e) => {
   e.preventDefault();
@@ -1320,26 +1468,94 @@ function renderTunnel(s, busy = "") {
   }
 }
 async function refreshTunnel() {
-  try { renderTunnel(await invoke("tunnel_status")); } catch (err) { $("pherr").textContent = String(err); }
-}
-async function installCloudflared() {
-  if (!(await confirmBox("安裝 cloudflared？", INSTALL_NOTE, "安裝"))) return false;
   try {
-    renderTunnel({}, "下載並驗證中（約 55 MB），請稍候…");
-    renderTunnel(await invoke("tunnel_install"));
-    toast("cloudflared 已安裝");
+    if (installing) return;
+    if (inTauri && (await invoke("tunnel_progress")).active) return runInstall("direct", true);
+    renderTunnel(await invoke("tunnel_status"));
+  } catch (err) { $("pherr").textContent = String(err); }
+}
+const mb = (n) => (n / 1048576).toFixed(1);
+function renderProgress(p, method) {
+  const b = $("rm-body");
+  if (!$("pg-bar")) {
+    b.innerHTML = `<div class="prog"><b>${method === "winget" ? "正在用 winget 安裝 cloudflared" : "正在下載並安裝 cloudflared"}</b>
+      <div class="pgbar"><i id="pg-bar"></i></div><p class="hint" id="pg-txt"></p>
+      <p class="hint">請不要關閉 MoneyPi，完成後會自動顯示下一步。</p></div>`;
+  }
+  const known = p.total > 0 && p.done > 0 && p.stage === "下載中";
+  const bar = $("pg-bar");
+  bar.classList.toggle("ind", !known);
+  bar.style.width = known ? Math.min(100, (p.done / p.total) * 100).toFixed(1) + "%" : "";
+  $("pg-txt").textContent = known
+    ? `下載中　${mb(p.done)} / ${mb(p.total)} MB（${Math.floor((p.done / p.total) * 100)}%）`
+    : p.stage || "準備中…";
+}
+
+let installing = false;
+// attach = only watch an installation that is already running (e.g. the dialog was reopened)
+async function runInstall(method = "direct", attach = false) {
+  if (installing) return false;
+  installing = true;
+  renderProgress({ stage: "準備中…", done: 0, total: 0 }, method);
+  const poll = setInterval(async () => {
+    try { renderProgress(await invoke("tunnel_progress"), method); } catch {}
+  }, 250);
+  try {
+    let s;
+    if (attach) {
+      do { await new Promise((r) => setTimeout(r, 400)); } while ((await invoke("tunnel_progress")).active);
+      s = await invoke("tunnel_status");
+      if (!s.installed) throw new Error("安裝沒有完成");
+    } else s = await invoke("tunnel_install", { method });
+    clearInterval(poll);
+    renderTunnel(s);
+    toast("cloudflared 已安裝，可以開啟遠端連線了");
     return true;
   } catch (err) {
-    $("pherr").textContent = "安裝失敗：" + err;
-    refreshTunnel();
+    clearInterval(poll);
+    await renderInstallFail(String(err));
     return false;
+  } finally {
+    installing = false;
   }
+}
+
+// Install failed: offer retry, winget (only if this PC has it) or a do-it-yourself guide.
+async function renderInstallFail(err) {
+  let s = {};
+  try { s = await invoke("tunnel_status"); } catch {}
+  $("rm-body").innerHTML = `<p class="neg">安裝沒有成功：${esc(err)}</p>
+    <div class="guide">
+      <b>可以這樣處理</b>
+      <div class="btnrow"><button type="button" class="primary" id="rm-retry">重試</button>
+        ${s.winget ? '<button type="button" id="rm-winget">改用 winget 安裝</button>' : ""}</div>
+      ${s.winget ? "" : '<p class="hint">這台電腦沒有 winget（Windows 內建的安裝工具），所以請自行下載：</p>'}
+      <p class="hint">自己安裝只要 3 步：</p>
+      <ol class="steps">
+        <li>按「開啟下載頁」，下載 <code>cloudflared-windows-amd64.exe</code></li>
+        <li>把它改名為 <code>cloudflared.exe</code>，放到這個資料夾（沒有就自己建立）：<div class="url">${esc(s.bin_dir || "")}</div></li>
+        <li>回到這裡按「重新偵測」</li>
+      </ol>
+      <div class="btnrow"><button type="button" id="rm-open">開啟下載頁</button><button type="button" id="rm-detect">重新偵測</button></div>
+    </div>`;
+}
+
+async function installCloudflared() {
+  if (!(await confirmBox("安裝 cloudflared？", INSTALL_NOTE, "安裝"))) return false;
+  return runInstall("direct");
 }
 $("rm-body").onclick = async (e) => {
   const id = e.target.closest("button")?.id;
   $("pherr").textContent = "";
   try {
     if (id === "rm-install") await installCloudflared();
+    else if (id === "rm-retry") await runInstall("direct");
+    else if (id === "rm-winget") await runInstall("winget");
+    else if (id === "rm-open") await invoke("open_external", { target: "releases" });
+    else if (id === "rm-detect") {
+      const s = await invoke("tunnel_status");
+      if (s.installed) { renderTunnel(s); toast("已偵測到 cloudflared"); } else $("pherr").textContent = "還沒找到 cloudflared，請確認檔名是 cloudflared.exe 且放在上面的資料夾";
+    }
     else if (id === "rm-start") {
       renderTunnel({}, "正在建立遠端連線（約數秒）…");
       renderTunnel(await invoke("tunnel_start"));
@@ -1360,11 +1576,11 @@ async function offerRemoteInstall() {
     store.set("remote_prompted", "1");
     if (s.installed) return;
     if (await confirmBox("要啟用遠端連線功能嗎？", "遠端連線讓你不用同一個 Wi-Fi，在外面也能用手機連回這台電腦。需要下載 Cloudflare 的 cloudflared 工具（約 55 MB，官方來源並核對校驗碼）。不安裝也能正常使用 MoneyPi，之後隨時可以在「手機連線 → 遠端」補裝。", "安裝")) {
-      toast("下載並驗證中…");
-      await invoke("tunnel_install");
-      toast("cloudflared 已安裝，可到「手機連線 → 遠端」開啟");
+      $("phone-btn").click(); // show the installation where the user can follow it
+      setPhTab("remote");
+      await runInstall("direct");
     }
-  } catch (err) { toast("安裝失敗：" + err); }
+  } catch (err) { toast("無法開始安裝：" + err); }
 }
 $("ph-tips-btn").onclick = () => ($("ph-tips").hidden = !$("ph-tips").hidden);
 $("phform").onsubmit = async (e) => {

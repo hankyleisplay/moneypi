@@ -365,6 +365,16 @@ struct Core {
     tunnel: Mutex<Option<Tunnel>>,
     /// Consecutive failed LAN PIN attempts and the end of the current lockout.
     auth_fail: Mutex<(u32, Option<Instant>)>,
+    /// What the cloudflared installer is doing right now (polled by the window).
+    progress: Mutex<Progress>,
+}
+
+#[derive(Default, Clone)]
+struct Progress {
+    active: bool,
+    stage: String,
+    done: u64,
+    total: u64,
 }
 
 /// A running Cloudflare quick tunnel. Killed when dropped.
@@ -419,7 +429,8 @@ const CLOUDFLARED_RELEASES: &str = "https://api.github.com/repos/cloudflare/clou
 
 /// Download the official cloudflared build and install it only if it matches the SHA-256
 /// digest GitHub publishes for the release asset.
-fn download_cloudflared(dest: &Path) -> Result<(), String> {
+fn download_cloudflared(dest: &Path, report: &dyn Fn(&str, u64, u64)) -> Result<(), String> {
+    report("查詢官方版本…", 0, 0);
     let rel: Value = ureq::get(CLOUDFLARED_RELEASES)
         .set("User-Agent", "MoneyPi")
         .set("Accept", "application/vnd.github+json")
@@ -447,11 +458,18 @@ fn download_cloudflared(dest: &Path) -> Result<(), String> {
         .timeout(Duration::from_secs(600))
         .call()
         .map_err(|e| format!("下載失敗：{e}"))?;
+    let total = resp
+        .header("Content-Length")
+        .and_then(|v| v.parse::<u64>().ok())
+        .or_else(|| asset["size"].as_u64())
+        .unwrap_or(0);
     let mut reader = resp.into_reader();
     let part = dest.with_extension("exe.part");
     let result = (|| -> Result<String, String> {
         let mut f = fs::File::create(&part).map_err(|e| e.to_string())?;
         let (mut hasher, mut buf) = (Sha256::new(), vec![0u8; 64 * 1024]);
+        let mut done = 0u64;
+        let mut last = Instant::now() - Duration::from_secs(1);
         loop {
             let n = reader.read(&mut buf).map_err(|e| format!("下載中斷：{e}"))?;
             if n == 0 {
@@ -459,7 +477,14 @@ fn download_cloudflared(dest: &Path) -> Result<(), String> {
             }
             hasher.update(&buf[..n]);
             f.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            done += n as u64;
+            if last.elapsed() >= Duration::from_millis(100) {
+                report("下載中", done, total);
+                last = Instant::now();
+            }
         }
+        report("下載中", done, total);
+        report("驗證校驗碼…", done, total);
         f.flush().map_err(|e| e.to_string())?;
         Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
     })();
@@ -474,7 +499,77 @@ fn download_cloudflared(dest: &Path) -> Result<(), String> {
         let _ = fs::remove_file(&part);
         return Err("下載檔案的校驗碼不符，已中止（檔案可能損毀或被竄改）".into());
     }
+    report("安裝中…", 1, 1);
     fs::rename(&part, dest).map_err(|e| e.to_string())
+}
+
+/// winget (App Installer) ships with current Windows 10/11 but not every machine has it.
+fn winget_available() -> bool {
+    static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let mut c = Command::new("winget");
+        c.arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x0800_0000);
+        }
+        c.status().map(|s| s.success()).unwrap_or(false)
+    })
+}
+
+/// Open one of a fixed set of places for the "install it yourself" guide.
+fn open_external(target: &str) -> Result<(), String> {
+    let mut c = Command::new("cmd");
+    match target {
+        "releases" => c.args(["/C", "start", "", "https://github.com/cloudflare/cloudflared/releases/latest"]),
+        _ => return Err("不支援的項目".into()),
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000);
+    }
+    c.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------- price history
+
+/// Daily closes from Yahoo as (YYYY-MM-DD, close), oldest first.
+fn fetch_chart(symbol: &str, query: &str) -> Result<(Vec<(String, f64)>, String), String> {
+    let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{}?{query}", percent_encode(symbol));
+    let v: Value = ureq::get(&url)
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MoneyPi")
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|e| format!("連線失敗：{e}"))?
+        .into_json()
+        .map_err(|e| format!("回應格式錯誤：{e}"))?;
+    let r = &v["chart"]["result"][0];
+    let ts = r["timestamp"].as_array().ok_or("查無歷史價格")?;
+    let closes = r["indicators"]["quote"][0]["close"].as_array().ok_or("查無歷史價格")?;
+    let off = r["meta"]["gmtoffset"].as_i64().unwrap_or(0);
+    let cur = r["meta"]["currency"].as_str().unwrap_or("").to_uppercase();
+    let mut out = Vec::new();
+    for (t, c) in ts.iter().zip(closes) {
+        if let (Some(t), Some(c)) = (t.as_i64(), c.as_f64()) {
+            if let Some(dt) = chrono::DateTime::from_timestamp(t + off, 0) {
+                out.push((dt.format("%Y-%m-%d").to_string(), c));
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("查無歷史價格".into());
+    }
+    Ok((out, cur))
+}
+
+fn fetch_series(symbol: &str, market: &str, query: &str) -> Result<(Vec<(String, f64)>, String), String> {
+    if market == "tw" {
+        fetch_chart(&format!("{symbol}.TW"), query).or_else(|_| fetch_chart(&format!("{symbol}.TWO"), query))
+    } else {
+        fetch_chart(symbol, query)
+    }
 }
 
 impl Core {
@@ -973,16 +1068,125 @@ impl Core {
         };
         let qr = link.as_deref().and_then(qr_svg);
         // `link` embeds the secret: it is only ever returned to the desktop window, never over HTTP
-        json!({ "installed": installed.is_some(), "running": running, "url": url, "link": link, "qr": qr })
+        json!({ "installed": installed.is_some(), "running": running, "url": url, "link": link, "qr": qr,
+            "winget": winget_available(), "bin_dir": self.bin_dir().map(|p| p.display().to_string()).unwrap_or_default() })
     }
 
-    fn tunnel_install(&self) -> Result<Value, String> {
+    fn set_progress(&self, active: bool, stage: &str, done: u64, total: u64) {
+        *self.progress.lock().unwrap() = Progress { active, stage: stage.to_string(), done, total };
+    }
+
+    fn tunnel_progress(&self) -> Value {
+        let p = self.progress.lock().unwrap().clone();
+        json!({ "active": p.active, "stage": p.stage, "done": p.done, "total": p.total })
+    }
+
+    fn bin_dir(&self) -> Result<PathBuf, String> {
+        Ok(self.path.parent().ok_or("找不到資料夾")?.join("bin"))
+    }
+
+    /// method: "direct" = official download with checksum, "winget" = `winget install`.
+    fn tunnel_install(&self, method: &str) -> Result<Value, String> {
+        if self.find_cloudflared().is_some() {
+            return Ok(self.tunnel_status());
+        }
+        {
+            let mut p = self.progress.lock().unwrap();
+            if p.active {
+                return Err("正在安裝中，請稍候".into());
+            }
+            *p = Progress { active: true, stage: "準備中…".into(), done: 0, total: 0 };
+        }
+        let res = match method {
+            "winget" => self.install_with_winget(),
+            _ => self.bin_dir().and_then(|dir| {
+                fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                download_cloudflared(&dir.join("cloudflared.exe"), &|st, d, t| self.set_progress(true, st, d, t))
+            }),
+        };
+        self.set_progress(false, "", 0, 0);
+        res?;
         if self.find_cloudflared().is_none() {
-            let dir = self.path.parent().ok_or("找不到資料夾")?.join("bin");
-            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            download_cloudflared(&dir.join("cloudflared.exe"))?;
+            return Err("安裝完成但找不到 cloudflared，請按「重新偵測」或重新啟動 MoneyPi".into());
         }
         Ok(self.tunnel_status())
+    }
+
+    fn install_with_winget(&self) -> Result<(), String> {
+        if !winget_available() {
+            return Err("這台電腦沒有 winget".into());
+        }
+        let mut cmd = Command::new("winget");
+        cmd.args(["install", "--id", "Cloudflare.cloudflared", "-e", "--accept-package-agreements", "--accept-source-agreements"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("無法執行 winget：{e}"))?;
+        let mut out = child.stdout.take().ok_or("無法讀取 winget 輸出")?;
+        let (mut buf, mut line) = ([0u8; 512], Vec::<u8>::new());
+        loop {
+            let n = out.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if b == b'\r' || b == b'\n' {
+                    let t = String::from_utf8_lossy(&line).trim().to_string();
+                    // winget draws its progress bar with block characters; keep only readable lines
+                    if t.chars().any(|c| c.is_alphanumeric()) && t.chars().count() > 2 {
+                        self.set_progress(true, &t.chars().take(70).collect::<String>(), 0, 0);
+                    }
+                    line.clear();
+                } else {
+                    line.push(b);
+                }
+            }
+        }
+        let st = child.wait().map_err(|e| e.to_string())?;
+        if !st.success() && self.find_cloudflared().is_none() {
+            return Err(format!("winget 安裝失敗（代碼 {}）", st.code().unwrap_or(-1)));
+        }
+        Ok(())
+    }
+
+    fn price_history(&self, id: u64, range: &str) -> Result<Value, String> {
+        if !matches!(range, "6mo" | "1y" | "2y" | "5y") {
+            return Err("不支援的區間".into());
+        }
+        let (sym, mkt) = self.quote_target(id)?;
+        let (pts, cur) = fetch_series(&sym, &mkt, &format!("range={range}&interval=1d"))?;
+        Ok(json!({ "currency": cur, "points": pts }))
+    }
+
+    /// Closing price on `date` (or the last trading day before it).
+    fn price_on(&self, id: u64, date: &str) -> Result<Value, String> {
+        if !valid_date(date) {
+            return Err("日期格式需為 YYYY-MM-DD".into());
+        }
+        let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|e| e.to_string())?;
+        if day > chrono::Local::now().date_naive() {
+            return Err("這個日期還沒到，沒有收盤價".into());
+        }
+        let ts = |d: chrono::NaiveDate| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+        let (sym, mkt) = self.quote_target(id)?;
+        let q = format!("period1={}&period2={}&interval=1d", ts(day - chrono::Duration::days(10)), ts(day + chrono::Duration::days(2)));
+        let (pts, cur) = fetch_series(&sym, &mkt, &q)?;
+        let (d, p) = pts.iter().rev().find(|(d, _)| d.as_str() <= date).ok_or("該日期之前查無收盤價（可能早於上市日）")?;
+        Ok(json!({ "date": d, "price": p, "currency": cur }))
+    }
+
+    fn quote_target(&self, id: u64) -> Result<(String, String), String> {
+        let d = self.data.lock().unwrap();
+        let a = d.assets.iter().find(|a| a.id == id).ok_or("找不到該項目")?;
+        if !a.holding || a.market.is_empty() || a.symbol.trim().is_empty() {
+            return Err("此項目沒有設定行情代號".into());
+        }
+        Ok((a.symbol.trim().to_string(), a.market.clone()))
     }
 
     fn tunnel_start(self: &Arc<Self>) -> Result<Value, String> {
@@ -1211,7 +1415,11 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "export_backup" => Ok(Value::String(core.export_backup())),
         "import_backup" => core.import_backup(&arg::<String>(&args, "text")?),
         "tunnel_status" if !remote => Ok(core.tunnel_status()),
-        "tunnel_install" if !remote => core.tunnel_install(),
+        "tunnel_install" if !remote => core.tunnel_install(args["method"].as_str().unwrap_or("direct")),
+        "tunnel_progress" if !remote => Ok(core.tunnel_progress()),
+        "open_external" if !remote => open_external(&arg::<String>(&args, "target")?).map(|_| Value::Null),
+        "price_history" => core.price_history(arg(&args, "id")?, &arg::<String>(&args, "range")?),
+        "price_on" => core.price_on(arg(&args, "id")?, &arg::<String>(&args, "date")?),
         "tunnel_start" if !remote => core.tunnel_start(),
         "tunnel_stop" if !remote => Ok(core.tunnel_stop()),
         "get_sync" if !remote => Ok(core.sync_info()),
@@ -1414,6 +1622,7 @@ pub fn run() {
                 server: Mutex::new(None),
                 tunnel: Mutex::new(None),
                 auth_fail: Mutex::new((0, None)),
+                progress: Mutex::new(Progress::default()),
             });
             if enabled {
                 if let Err(e) = core.start_server("0.0.0.0", port) {
@@ -1546,6 +1755,7 @@ mod tests {
             server: Mutex::new(None),
             tunnel: Mutex::new(None),
             auth_fail: Mutex::new((0, None)),
+            progress: Mutex::new(Progress::default()),
         }
     }
 
@@ -1627,7 +1837,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let dest = dir.join("cloudflared.exe");
-        download_cloudflared(&dest).unwrap();
+        let seen = Mutex::new(Vec::<(String, u64, u64)>::new());
+        download_cloudflared(&dest, &|st, d, t| seen.lock().unwrap().push((st.to_string(), d, t))).unwrap();
+        let seen = seen.into_inner().unwrap();
+        let dl: Vec<_> = seen.iter().filter(|x| x.0 == "下載中").collect();
+        assert!(dl.len() > 5, "progress should be reported repeatedly");
+        assert!(dl.windows(2).all(|w| w[0].1 <= w[1].1));
+        let last = dl.last().unwrap();
+        assert!(last.2 > 1_000_000 && last.1 == last.2, "download ends at 100%: {last:?}");
+        assert!(seen.iter().any(|x| x.0.starts_with("驗證")) && seen.last().unwrap().0.starts_with("安裝"));
         let out = Command::new(&dest).arg("--version").output().unwrap();
         assert!(String::from_utf8_lossy(&out.stdout).contains("cloudflared version"));
         assert!(!dest.with_extension("exe.part").exists());
