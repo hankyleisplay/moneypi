@@ -327,3 +327,8 @@ img.logo{background:none;border-radius:0;box-shadow:none;object-fit:contain;filt
 .pickrow .hint{flex:1;min-width:180px}
 #fc{height:260px;margin-top:6px}
 .fc-sum{margin-top:10px}
+
+.plan{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:10px 0;border-top:1px solid var(--line)}
+.plan:first-of-type{border-top:0}
+.plan-t{display:grid;gap:2px;font-size:14px}
+.plan-t .muted{font-size:12.5px}

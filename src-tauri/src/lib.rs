@@ -113,6 +113,37 @@ struct Goal {
     history: Vec<GoalPoint>,
 }
 
+/// A recurring monthly purchase (定期定額) that books itself as "buy" transactions.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct Plan {
+    #[serde(default)]
+    id: u64,
+    /// The holding that gets bought.
+    asset: u64,
+    /// Money taken each period, in the asset's currency; the fee is part of it.
+    amount: f64,
+    /// Day of the month (1-31; short months use their last day).
+    day: u32,
+    start: String,
+    /// Empty = no end.
+    #[serde(default)]
+    end: String,
+    #[serde(default)]
+    fee: f64,
+    /// Only whole units (Taiwan stocks); otherwise fractional units are bought.
+    #[serde(default)]
+    whole: bool,
+    /// Deposit the money comes from; 0 = outside the app.
+    #[serde(default)]
+    cash: u64,
+    /// Last scheduled date that has been booked (YYYY-MM-DD).
+    #[serde(default)]
+    last: String,
+    /// Why the plan is stuck (e.g. not enough deposit); empty when fine.
+    #[serde(default)]
+    status: String,
+}
+
 /// One income/expense entry of the bookkeeping ledger (always TWD).
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Flow {
@@ -164,6 +195,10 @@ struct Data {
     cashflow: Vec<Flow>,
     #[serde(default)]
     next_flow: u64,
+    #[serde(default)]
+    plans: Vec<Plan>,
+    #[serde(default)]
+    next_plan: u64,
 }
 
 impl Default for Data {
@@ -183,6 +218,8 @@ impl Default for Data {
             sync_pin: String::new(),
             cashflow: vec![],
             next_flow: 0,
+            plans: vec![],
+            next_plan: 0,
         }
     }
 }
@@ -340,6 +377,45 @@ fn validate_flow(f: &Flow) -> Result<(), String> {
     Ok(())
 }
 
+fn r4(x: f64) -> f64 {
+    (x * 10_000.0).round() / 10_000.0
+}
+
+/// Units one plan period buys at `price`: the fee comes out of the amount first.
+fn plan_units(amount: f64, fee: f64, price: f64, whole: bool) -> f64 {
+    if price <= 0.0 {
+        return 0.0;
+    }
+    let u = ((amount - fee) / price).max(0.0);
+    if whole { u.floor() } else { (u * 10_000.0).floor() / 10_000.0 }
+}
+
+/// Scheduled dates of a plan up to `today` that have not been booked yet.
+fn due_dates(p: &Plan, today: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
+    use chrono::Datelike;
+    let Ok(start) = chrono::NaiveDate::parse_from_str(&p.start, "%Y-%m-%d") else { return vec![] };
+    let end = chrono::NaiveDate::parse_from_str(&p.end, "%Y-%m-%d").unwrap_or(today).min(today);
+    let (mut y, mut m) = (start.year(), start.month());
+    let mut out = vec![];
+    while out.len() < 600 {
+        let mut d = p.day.clamp(1, 31);
+        let date = loop {
+            if let Some(x) = chrono::NaiveDate::from_ymd_opt(y, m, d) {
+                break x;
+            }
+            d -= 1;
+        };
+        if date > end {
+            break;
+        }
+        if date >= start && date.format("%Y-%m-%d").to_string() > p.last {
+            out.push(date);
+        }
+        if m == 12 { y += 1; m = 1 } else { m += 1 }
+    }
+    out
+}
+
 fn validate_tx(t: &Tx) -> Result<(), String> {
     if !valid_date(&t.date) {
         return Err("日期格式需為 YYYY-MM-DD".into());
@@ -367,6 +443,8 @@ struct Core {
     auth_fail: Mutex<(u32, Option<Instant>)>,
     /// What the cloudflared installer is doing right now (polled by the window).
     progress: Mutex<Progress>,
+    /// Held while recurring plans are being booked so two clients cannot book the same period twice.
+    plan_lock: Mutex<()>,
 }
 
 #[derive(Default, Clone)]
@@ -554,7 +632,7 @@ fn fetch_chart(symbol: &str, query: &str) -> Result<(Vec<(String, f64)>, String)
     for (t, c) in ts.iter().zip(closes) {
         if let (Some(t), Some(c)) = (t.as_i64(), c.as_f64()) {
             if let Some(dt) = chrono::DateTime::from_timestamp(t + off, 0) {
-                out.push((dt.format("%Y-%m-%d").to_string(), c));
+                out.push((dt.format("%Y-%m-%d").to_string(), r4(c)));
             }
         }
     }
@@ -737,8 +815,147 @@ impl Core {
     fn delete_asset(&self, id: u64) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
         d.assets.retain(|a| a.id != id);
+        d.plans.retain(|p| p.asset != id);
+        for p in d.plans.iter_mut().filter(|p| p.cash == id) {
+            p.cash = 0;
+        }
         self.commit(&mut d)?;
         Ok(view(&d))
+    }
+
+    fn save_plan(&self, mut p: Plan) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        let a = d.assets.iter().find(|a| a.id == p.asset).ok_or("找不到該項目")?;
+        if !a.holding {
+            return Err("請先將此項目設為「持倉」".into());
+        }
+        if !p.amount.is_finite() || p.amount <= 0.0 {
+            return Err("每期金額必須大於 0".into());
+        }
+        if !p.fee.is_finite() || p.fee < 0.0 || p.fee >= p.amount {
+            return Err("手續費必須小於每期金額".into());
+        }
+        if !(1..=31).contains(&p.day) {
+            return Err("扣款日必須是 1 到 31".into());
+        }
+        if !valid_date(&p.start) {
+            return Err("開始日期格式需為 YYYY-MM-DD".into());
+        }
+        if !p.end.is_empty() && (!valid_date(&p.end) || p.end < p.start) {
+            return Err("結束日期需晚於開始日期".into());
+        }
+        if p.cash != 0 {
+            let c = d.assets.iter().find(|x| x.id == p.cash).ok_or("找不到資金來源（存款）")?;
+            if c.holding || c.liability || c.id == p.asset {
+                return Err("資金來源必須是一般資產（如銀行存款、現金）".into());
+            }
+        }
+        p.status.clear();
+        if p.id == 0 {
+            p.last.clear();
+            d.next_plan += 1;
+            p.id = d.next_plan;
+            d.plans.push(p);
+        } else {
+            let slot = d.plans.iter_mut().find(|x| x.id == p.id).ok_or("找不到這個定期定額")?;
+            p.last = slot.last.clone();
+            *slot = p;
+        }
+        self.persist(&d)?;
+        Ok(view(&d))
+    }
+
+    fn delete_plan(&self, id: u64) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.plans.retain(|p| p.id != id);
+        self.persist(&d)?;
+        Ok(view(&d))
+    }
+
+    fn plan_mark(&self, id: u64, last: Option<&str>, status: &str) {
+        let mut d = self.data.lock().unwrap();
+        if let Some(p) = d.plans.iter_mut().find(|p| p.id == id) {
+            if let Some(l) = last {
+                p.last = l.to_string();
+            }
+            p.status = status.to_string();
+        }
+        let _ = self.persist(&d);
+    }
+
+    /// Book every plan period that has come due since the last run (also backfills past periods).
+    /// Prices are the first close on or after the scheduled day, so the date is the real trading day.
+    fn run_plans(&self) -> Result<Value, String> {
+        let _guard = self.plan_lock.lock().unwrap();
+        let today_d = chrono::Local::now().date_naive();
+        let today_s = today_d.format("%Y-%m-%d").to_string();
+        let plans: Vec<Plan> = self.data.lock().unwrap().plans.clone();
+        let mut added = 0usize;
+        for p in plans {
+            let due = due_dates(&p, today_d);
+            if due.is_empty() {
+                continue;
+            }
+            let target = {
+                let d = self.data.lock().unwrap();
+                d.assets.iter().find(|a| a.id == p.asset).map(|a| (a.symbol.trim().to_string(), a.market.clone(), a.price))
+            };
+            let Some((sym, mkt, cur_price)) = target else { continue };
+            let series = if mkt.is_empty() {
+                None
+            } else {
+                let ts = |d: chrono::NaiveDate| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+                let q = format!("period1={}&period2={}&interval=1d", ts(due[0]), ts(today_d + chrono::Duration::days(2)));
+                match fetch_series(&sym, &mkt, &q) {
+                    Ok((pts, _)) => Some(pts),
+                    Err(e) => {
+                        self.plan_mark(p.id, None, &format!("查詢價格失敗，之後會再試：{e}"));
+                        continue;
+                    }
+                }
+            };
+            for day in due.into_iter().take(60) {
+                let ds = day.format("%Y-%m-%d").to_string();
+                let (date, price, est) = match &series {
+                    // the day's close is only final once the day is over
+                    Some(pts) => match pts.iter().find(|(d, _)| d.as_str() >= ds.as_str() && d.as_str() < today_s.as_str()) {
+                        Some((d, c)) => (d.clone(), *c, false),
+                        None => break,
+                    },
+                    None if cur_price > 0.0 => (ds.clone(), cur_price, true),
+                    None => {
+                        self.plan_mark(p.id, None, "沒有行情代號，請先在項目裡填現價／淨值");
+                        break;
+                    }
+                };
+                let units = plan_units(p.amount, p.fee, price, p.whole);
+                if units <= 0.0 {
+                    self.plan_mark(p.id, Some(&ds), &format!("{ds} 的金額不足以買 1 單位，已略過"));
+                    continue;
+                }
+                let tx = Tx {
+                    date,
+                    kind: "buy".into(),
+                    units,
+                    price: r4(price),
+                    fee: p.fee,
+                    note: if est { "定期定額（以目前價格估算）" } else { "定期定額" }.into(),
+                    cash: p.cash,
+                    cash_delta: 0.0,
+                };
+                match self.add_tx(p.asset, tx) {
+                    Ok(_) => {
+                        added += 1;
+                        self.plan_mark(p.id, Some(&ds), "");
+                    }
+                    Err(e) => {
+                        self.plan_mark(p.id, None, &format!("{ds} 沒有成功：{e}"));
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(json!({ "added": added, "data": view(&self.data.lock().unwrap()) }))
     }
 
     fn add_tx(&self, id: u64, mut tx: Tx) -> Result<Value, String> {
@@ -1337,7 +1554,7 @@ fn fetch_yahoo(symbol: &str) -> Result<Quote, String> {
         .into_json()
         .map_err(|e| format!("回應格式錯誤：{e}"))?;
     let meta = &v["chart"]["result"][0]["meta"];
-    let price = meta["regularMarketPrice"].as_f64().ok_or("查無報價")?;
+    let price = r4(meta["regularMarketPrice"].as_f64().ok_or("查無報價")?);
     let currency = meta["currency"].as_str().unwrap_or("").to_uppercase();
     Ok(Quote { price, currency })
 }
@@ -1418,6 +1635,9 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "tunnel_install" if !remote => core.tunnel_install(args["method"].as_str().unwrap_or("direct")),
         "tunnel_progress" if !remote => Ok(core.tunnel_progress()),
         "open_external" if !remote => open_external(&arg::<String>(&args, "target")?).map(|_| Value::Null),
+        "save_plan" => core.save_plan(arg(&args, "plan")?),
+        "delete_plan" => core.delete_plan(arg(&args, "id")?),
+        "run_plans" => core.run_plans(),
         "price_history" => core.price_history(arg(&args, "id")?, &arg::<String>(&args, "range")?),
         "price_on" => core.price_on(arg(&args, "id")?, &arg::<String>(&args, "date")?),
         "tunnel_start" if !remote => core.tunnel_start(),
@@ -1623,6 +1843,7 @@ pub fn run() {
                 tunnel: Mutex::new(None),
                 auth_fail: Mutex::new((0, None)),
                 progress: Mutex::new(Progress::default()),
+                plan_lock: Mutex::new(()),
             });
             if enabled {
                 if let Err(e) = core.start_server("0.0.0.0", port) {
@@ -1756,6 +1977,7 @@ mod tests {
             tunnel: Mutex::new(None),
             auth_fail: Mutex::new((0, None)),
             progress: Mutex::new(Progress::default()),
+            plan_lock: Mutex::new(()),
         }
     }
 
@@ -1805,6 +2027,58 @@ mod tests {
         let mut bad = tx("2026-03-01", "buy", 1.0, 1.0, 0.0);
         bad.cash = 3;
         assert!(c.add_tx(2, bad).is_err());
+        let _ = fs::remove_file(&c.path);
+    }
+
+    #[test]
+    fn plan_schedule_and_units() {
+        let day = |y, m, d| chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let p = Plan { day: 31, start: "2026-01-15".into(), amount: 3000.0, ..Default::default() };
+        let due = due_dates(&p, day(2026, 4, 15));
+        assert_eq!(due, vec![day(2026, 1, 31), day(2026, 2, 28), day(2026, 3, 31)]);
+        let done = Plan { last: "2026-02-28".into(), ..p.clone() };
+        assert_eq!(due_dates(&done, day(2026, 4, 15)), vec![day(2026, 3, 31)]);
+        let ended = Plan { end: "2026-02-10".into(), ..p };
+        assert_eq!(due_dates(&ended, day(2026, 4, 15)), vec![day(2026, 1, 31)]);
+        // fee comes out of the amount; whole units round down
+        assert_eq!(plan_units(3000.0, 20.0, 100.0, true), 29.0);
+        assert_eq!(plan_units(3000.0, 0.0, 7.0, false), 428.5714);
+        assert_eq!(plan_units(50.0, 1.0, 2400.0, true), 0.0);
+    }
+
+    #[test]
+    fn recurring_plan_books_buys_from_the_deposit() {
+        let c = test_core();
+        let c = Core { path: std::env::temp_dir().join(format!("moneypi-test-{}.json", random_hex(4))), ..c };
+        let today_d = chrono::Local::now().date_naive();
+        let start = (today_d - chrono::Duration::days(75)).format("%Y-%m-%d").to_string();
+        {
+            let mut d = c.data.lock().unwrap();
+            d.assets = vec![
+                Asset { id: 1, name: "銀行".into(), category: "銀行存款".into(), currency: "TWD".into(), value: 100_000.0, ..Default::default() },
+                Asset { id: 2, name: "基金".into(), category: "基金/ETF".into(), currency: "TWD".into(), holding: true, price: 10.0, ..Default::default() },
+            ];
+        }
+        c.save_plan(Plan { asset: 2, amount: 3000.0, day: 5, start: start.clone(), cash: 1, ..Default::default() }).unwrap();
+        let expected = due_dates(&c.data.lock().unwrap().plans[0], today_d).len();
+        assert!(expected >= 2);
+        let r = c.run_plans().unwrap();
+        assert_eq!(r["added"].as_u64().unwrap() as usize, expected);
+        {
+            let d = c.data.lock().unwrap();
+            assert_eq!(d.assets[1].quantity, 300.0 * expected as f64);
+            assert_eq!(d.assets[0].value, 100_000.0 - 3000.0 * expected as f64);
+            assert!(d.plans[0].status.is_empty());
+        }
+        // running again books nothing new
+        assert_eq!(c.run_plans().unwrap()["added"], 0);
+        // not enough deposit: the plan stops and says why
+        c.data.lock().unwrap().assets[0].value = 10.0;
+        let tomorrow_plan = Plan { asset: 2, amount: 3000.0, day: 1, start, cash: 1, ..Default::default() };
+        c.save_plan(tomorrow_plan).unwrap();
+        c.run_plans().unwrap();
+        assert!(!c.data.lock().unwrap().plans[1].status.is_empty());
+        assert!(c.save_plan(Plan { asset: 2, amount: 100.0, fee: 100.0, day: 5, start: "2026-01-01".into(), ..Default::default() }).is_err());
         let _ = fs::remove_file(&c.path);
     }
 

@@ -479,7 +479,7 @@ function xirr(a) {
     v: t.kind === "buy" ? -(t.units * t.price + t.fee) : t.kind === "sell" ? t.units * t.price - t.fee : t.price,
   })).sort((x, y) => x.t - y.t);
   if (a.value > 0) f.push({ t: Date.now(), v: a.value });
-  if (!f.some((x) => x.v < 0) || !f.some((x) => x.v > 0) || f.at(-1).t - f[0].t < 30 * DAY) return null;
+  if (!f.some((x) => x.v < 0) || !f.some((x) => x.v > 0) || f.at(-1).t - f[0].t < 90 * DAY) return null;
   const npv = (r) => f.reduce((s, c) => s + c.v / Math.pow(1 + r, (c.t - f[0].t) / (365 * DAY)), 0);
   let lo = -0.99, hi = 20;
   if (npv(lo) * npv(hi) > 0) return null;
@@ -526,8 +526,13 @@ async function loadForecast(a) {
   }
   if (ui.sel !== a.id || !$("fc")) return;
   $("fc").style.display = "";
+  fcState = { a, s };
   drawForecast(a, s);
+  fcRO ??= new ResizeObserver(() => { if (fcState && $("fc") && ui.sel === fcState.a.id) drawForecast(fcState.a, fcState.s); });
+  fcRO.disconnect();
+  fcRO.observe($("fc"));
 }
+let fcState = null, fcRO = null;
 
 function drawForecast(a, s) {
   const pts = s.points, fit = fitTrend(pts), HOR = 365;
@@ -542,7 +547,7 @@ function drawForecast(a, s) {
   if (avg) { min = Math.min(min, avg); max = Math.max(max, avg); }
   const X = (t) => padL + ((t - t0) / (t1 - t0)) * (W - padL - padR);
   const Y = (v) => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
-  g.font = "11px 'Segoe UI Variable', sans-serif";
+  g.font = "12px 'Segoe UI Variable', sans-serif";
   g.lineWidth = 1;
   for (let i = 0; i <= 3; i++) {
     const v = min + ((max - min) * i) / 3, yy = Y(v);
@@ -606,6 +611,21 @@ $("view-detail").addEventListener("click", (e) => {
   if (a) { [...$("fc-seg").children].forEach((x) => x.classList.toggle("on", x === b)); loadForecast(a); }
 });
 
+function plansCard(a) {
+  const ps = (data.plans || []).filter((p) => p.asset === a.id);
+  const rows = ps.map((p) => {
+    const c = p.cash ? data.assets.find((x) => x.id === p.cash) : null;
+    return `<div class="plan"><div class="plan-t"><b class="${mask()}">每月 ${p.day} 日　${esc(a.currency)} ${fmt0.format(p.amount)}</b>
+      <span class="muted">${esc(p.start)} 起${p.end ? ` 至 ${esc(p.end)}` : ""}・${c ? `從「${esc(c.name)}」扣款` : "外部資金"}${p.whole ? "・只買整股" : ""}${p.fee ? `・手續費 ${fmt.format(p.fee)}` : ""}</span>
+      ${p.status ? `<div class="neg">⚠ ${esc(p.status)}</div>` : ""}</div>
+      <div class="btns"><button class="link" data-editplan="${p.id}">編輯</button><button class="link danger" data-delplan="${p.id}">刪除</button></div></div>`;
+  }).join("");
+  return `<div class="glass detail">
+    <div class="sect"><h3>定期定額 <span class="muted">(${ps.length})</span></h3><div class="btns"><button data-addplan>＋ 新增定期定額</button></div></div>
+    ${ps.length ? rows : '<p class="muted">每月固定日期自動買入。設定後 MoneyPi 會依當天收盤價自動記成買入交易，開始日期填過去也會自動補上之前每期。</p>'}
+  </div>`;
+}
+
 function cashTag(t) {
   if (!t.cash) return "";
   const c = data.assets.find((x) => x.id === t.cash);
@@ -656,7 +676,7 @@ function holdingHtml(a) {
     ${a.txs.length
       ? `<div class="tx-wrap"><table class="tx"><thead><tr><th>日期</th><th>類型</th><th class="r">單位</th><th class="r">單價</th><th class="r">手續費</th><th class="r">金額</th><th>備註</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
       : '<p class="muted">尚無交易記錄。記錄買入／賣出／配息後，數量、平均成本與損益會自動計算。已經持有很久？按「記錄交易」，把日期改成當初買進那天，就能用當時的價格算出真實損益。</p>'}
-  </div>${a.market ? forecastCard(a) : ""}`;
+  </div>${plansCard(a)}${a.market ? forecastCard(a) : ""}`;
 }
 
 function renderView() {
@@ -731,7 +751,7 @@ $("view-detail").onclick = async (e) => {
 
 /* ---------- charts ---------- */
 function setupCanvas(c) {
-  const r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const r = { width: c.clientWidth, height: c.clientHeight }, dpr = window.devicePixelRatio || 1;
   c.width = Math.round(r.width * dpr);
   c.height = Math.round(r.height * dpr);
   const g = c.getContext("2d");
@@ -1047,6 +1067,84 @@ tform.onsubmit = async (e) => {
     $("terr").textContent = String(err);
   }
 };
+
+/* ---------- recurring plan (定期定額) ---------- */
+const pldlg = $("pldlg"), plform = $("plform"), plCash = new Dropdown($("pl-cash"), () => syncPlanUI());
+let plAsset = null, plId = 0;
+
+function syncPlanUI() {
+  const src = data.assets.find((x) => String(x.id) === plCash.value);
+  $("pl-hint").textContent = src
+    ? `每期會從「${src.name}」扣除（目前 ${src.currency} ${fmt.format(src.value)}）。`
+    : "不動用 App 內的存款，視為另外準備的資金。";
+}
+
+function openPlan(a, p) {
+  plAsset = a;
+  plId = p ? p.id : 0;
+  plform.reset();
+  $("plerr").textContent = "";
+  $("pl-title").textContent = `${p ? "編輯" : "新增"}定期定額 · ${a.name}`;
+  plCash.setOptions([{ value: "0", label: "外部資金（不動用 App 內存款）" },
+    ...data.assets.filter((x) => !x.holding && !x.liability).map((c) => ({ value: String(c.id), label: `${c.name}（${c.currency} ${fmt0.format(c.value)}）` }))], p ? String(p.cash) : "0");
+  plform.amount.value = p ? p.amount : "";
+  plform.day.value = p ? p.day : new Date().getDate();
+  plform.fee.value = p && p.fee ? p.fee : "";
+  plform.start.value = p ? p.start : todayStr();
+  plform.end.value = p ? p.end : "";
+  plform.whole.checked = p ? p.whole : a.market === "tw";
+  syncPlanUI();
+  pldlg.showModal();
+  plform.amount.focus();
+}
+
+$("view-detail").addEventListener("click", async (e) => {
+  const a = data.assets.find((x) => x.id === ui.sel);
+  if (!a) return;
+  const t = (sel) => e.target.closest(sel);
+  try {
+    if (t("[data-addplan]")) openPlan(a, null);
+    else if (t("[data-editplan]")) openPlan(a, (data.plans || []).find((p) => p.id === Number(t("[data-editplan]").dataset.editplan)));
+    else if (t("[data-delplan]")) {
+      if (await confirmBox("刪除這個定期定額？", "已經記下的買入交易不會被刪除，只是之後不再自動買入。", "刪除")) {
+        data = await invoke("delete_plan", { id: Number(t("[data-delplan]").dataset.delplan) });
+        render();
+        toast("已刪除");
+      }
+    }
+  } catch (err) { toast(String(err)); }
+});
+
+plform.onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    data = await invoke("save_plan", {
+      plan: {
+        id: plId, asset: plAsset.id,
+        amount: num(plform.amount.value), day: Number(plform.day.value), fee: num(plform.fee.value),
+        start: plform.start.value.trim(), end: plform.end.value.trim(), whole: plform.whole.checked,
+        cash: Number(plCash.value) || 0,
+      },
+    });
+    pldlg.close();
+    render();
+    await runPlans(true);
+    if (!$("pldlg").open) toast("已儲存定期定額");
+  } catch (err) {
+    $("plerr").textContent = String(err);
+  }
+};
+
+// Book whatever has come due (also backfills). Only the desktop app does this.
+async function runPlans(announce) {
+  if (!inTauri || !data.plans?.length) return;
+  try {
+    const r = await invoke("run_plans");
+    data = r.data;
+    if (r.added || announce) render();
+    if (r.added) toast(`定期定額已自動新增 ${r.added} 筆買入`);
+  } catch (err) { if (announce) toast(String(err)); }
+}
 
 /* ---------- settings dialog ---------- */
 const sdlg = $("sdlg"), sform = $("sform");
@@ -1654,6 +1752,8 @@ invoke("get_data")
     render();
     scheduleRefresh();
     if (inTauri && data.refresh_min > 0) doRefresh(false);
+    runPlans(false);
+    setInterval(() => runPlans(false), 3600e3);
   })
   .catch((err) => toast(String(err)));
 if (inTauri) {

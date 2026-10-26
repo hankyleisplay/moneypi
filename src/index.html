@@ -205,6 +205,27 @@
   </form>
 </dialog>
 
+<dialog id="pldlg" class="glass">
+  <form method="dialog" id="plform">
+    <h3 id="pl-title">定期定額</h3>
+    <label>每期扣款金額<input name="amount" type="number" min="0" step="any" required></label>
+    <div class="two">
+      <label>每月扣款日<input name="day" type="number" min="1" max="31" step="1" required></label>
+      <label>每期手續費<input name="fee" type="number" min="0" step="any" placeholder="0"></label>
+    </div>
+    <div class="two">
+      <label>開始日期<input name="start" placeholder="YYYY-MM-DD" required autocomplete="off"></label>
+      <label>結束日期（可留空）<input name="end" placeholder="YYYY-MM-DD" autocomplete="off"></label>
+    </div>
+    <label class="chk"><input name="whole" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>只買整股／整單位（台股定期定額，未滿的不買）</span></label>
+    <div class="field">資金來源<div class="dd" id="pl-cash"></div></div>
+    <p class="hint" id="pl-hint"></p>
+    <p class="hint">開始日期可以填過去：之前每一期會用當天（或之後第一個交易日）的收盤價自動補上買入。若存款餘額是「已經扣過」的現況，請選「外部資金」以免重複扣款。</p>
+    <p id="plerr" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
+  </form>
+</dialog>
+
 <dialog id="sdlg" class="glass">
   <form method="dialog" id="sform">
     <h3>設定</h3>
