@@ -118,7 +118,7 @@ canvas{width:100%;height:230px;display:block}
 .blur{filter:blur(7px);user-select:none}
 
 /* ---------- form controls (custom) ---------- */
-input[type=text],input[type=number],input:not([type]){font:inherit;color:var(--fg);padding:8px 13px;border-radius:14px;background:var(--field);
+input[type=text],input[type=number],input[type=password],input:not([type]){font:inherit;color:var(--fg);padding:8px 13px;border-radius:14px;background:var(--field);
   border:1px solid var(--line);box-shadow:inset 0 1px 3px rgba(40,55,120,.08);width:100%;outline:none;transition:border-color .15s,box-shadow .15s}
 input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,107,255,.18)}
 input::placeholder{color:#9aa3bd}
@@ -361,3 +361,14 @@ img.logo{background:none;border-radius:0;box-shadow:none;object-fit:contain;filt
 .tour-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .tour-foot .grow{flex:1}
 .tour-card,#tip{background:rgba(255,255,255,.97);border:1px solid var(--line);box-shadow:0 18px 50px rgba(30,40,90,.28)}
+
+/* ---------- monthly report ---------- */
+.rp-tbl{width:100%;border-collapse:collapse;font-size:13.5px}
+.rp-tbl th{font-weight:500;color:var(--muted);text-align:right;padding:6px 8px;font-size:12.5px}
+.rp-tbl th:first-child,.rp-tbl td:first-child{text-align:left}
+.rp-tbl td{padding:8px;border-top:1px solid var(--line);text-align:right}
+.rp-goal{display:grid;gap:6px;padding:12px 0;border-top:1px solid var(--line)}
+.rp-goal:first-child{border-top:0}
+.rp-goal .top{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+#bk-dir{margin-top:4px}
+#sdlg .row + .hint{margin-top:2px}

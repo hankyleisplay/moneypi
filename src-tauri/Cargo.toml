@@ -1,6 +1,6 @@
 [package]
 name = "moneypi"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 
 [lib]
@@ -20,4 +20,6 @@ ureq = { version = "2", features = ["json"] }
 tiny_http = "0.12"
 sha2 = "0.10"
 getrandom = "0.2"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

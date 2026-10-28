@@ -36,6 +36,11 @@
       <span class="lbl">記帳</span>
     </button>
 
+    <button class="nav" id="nav-report" title="月報">
+      <span class="av" style="background:linear-gradient(145deg,#f59e0b,#f97316)"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M5 20V10M12 20V4M19 20v-7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span>
+      <span class="lbl">月報</span>
+    </button>
+
     <div class="side-tools">
       <input id="q" type="text" placeholder="搜尋項目…" autocomplete="off">
       <div class="seg" id="kind">
@@ -61,6 +66,9 @@
       <div class="actions">
         <button class="icon desk-only" id="phone-btn" title="手機連線" aria-label="手機連線" hidden>
           <svg viewBox="0 0 24 24" width="17" height="17"><rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M11 18.5h2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
+        </button>
+        <button class="icon" id="lock-btn" title="立即鎖定" aria-label="立即鎖定" hidden>
+          <svg viewBox="0 0 24 24" width="17" height="17"><rect x="5" y="10.5" width="14" height="10" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
         </button>
         <button class="icon" id="help-btn" title="說明與導覽" aria-label="說明與導覽"><b>?</b></button>
         <button class="icon" id="refresh-btn" title="同步股價與匯率" aria-label="同步股價與匯率">
@@ -124,6 +132,19 @@
 
     <div id="view-detail" class="view" hidden></div>
 
+    <div id="view-report" class="view" hidden>
+      <div class="glass panel">
+        <div class="panel-head">
+          <div class="monthnav"><button class="icon" id="rm-prev" aria-label="上個月">‹</button><h3 id="rm-label"></h3><button class="icon" id="rm-next" aria-label="下個月">›</button></div>
+        </div>
+        <div class="stats" id="rp-sum"></div>
+        <p class="hint" id="rp-note"></p>
+      </div>
+      <div class="glass panel"><h3>投資</h3><div id="rp-inv"></div></div>
+      <div class="glass panel"><h3>目標進度</h3><div id="rp-goals"></div></div>
+      <div class="glass panel"><h3>支出前幾名</h3><div class="bars" id="rp-cats"></div></div>
+    </div>
+
     <div id="view-flow" class="view" hidden>
       <div class="glass panel">
         <div class="panel-head">
@@ -160,6 +181,11 @@
       </div>
       <label>總成本<input name="cost" type="number" min="0" step="any"></label>
       <p class="hint" id="hold-hint"></p>
+      <div id="div-fields" hidden>
+        <label class="chk"><input name="autodiv" type="checkbox" checked><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>自動記錄配息（依除息日當時持有的股數）</span></label>
+        <div class="field">配息入帳到<div class="dd" id="f-divcash"></div></div>
+        <p class="hint">配息記在除息日，金額為稅前每股配息 × 持有股數；實際入帳日與扣的補充保費、手續費可能不同，可到交易記錄調整。刪除自動記下的配息後不會再補回來。</p>
+      </div>
     </div>
 
     <label class="chk"><input name="liability" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>這是負債（貸款、卡費…）</span></label>
@@ -251,6 +277,16 @@
       <p>刪除一筆交易時，被扣的存款會自動還回去。</p>
     </details>
 
+    <details class="help"><summary>月報、密碼與自動備份</summary>
+      <p><b>月報：</b>左邊「月報」看每個月的淨資產變化、記帳結餘、投資買賣與配息、各目標進度。記帳越完整，「估計投資與其他變動」越準。</p>
+      <p><b>密碼：</b>「設定 → 安全性」可設定密碼，資料檔會加密儲存，每次開啟都要輸入。<b>忘記密碼無法救回資料</b>。右上角的鎖頭可以立即鎖定。</p>
+      <p><b>自動備份：</b>「設定 → 自動備份」開啟後，每天複製一份資料檔到你指定的資料夾（例如 OneDrive），保留最近幾份。設了密碼的話，備份也是加密的，還原時需要輸入當時的密碼。</p>
+    </details>
+
+    <details class="help"><summary>配息會自動記錄嗎？</summary>
+      <p>有設定行情代號的持倉，MoneyPi 會依除息日前你持有的股數，自動記下配息（稅前每股配息 × 股數）。刪除自動記下的配息後不會再補回來。想關閉可在編輯項目時取消「自動記錄配息」，也可以選配息要入帳到哪個存款。</p>
+    </details>
+
     <details class="help"><summary>目標與預估達成時間</summary>
       <p>目標可以有很多個（財富自由、買車…），可以看總淨資產，也可以只算指定的幾個項目。</p>
       <p>預估時間是依你最近資產成長的速度推算的，需要累積幾天的紀錄才算得出來；填了目標日期，還會告訴你趕不趕得上。</p>
@@ -302,6 +338,28 @@
   </form>
 </dialog>
 
+<dialog id="qdlg" class="glass">
+  <form method="dialog" id="qform">
+    <h3 id="q-title">輸入密碼</h3>
+    <p class="hint" id="q-msg"></p>
+    <label>密碼<input name="pw" type="password" autocomplete="current-password" required></label>
+    <p id="qerr" class="neg"></p>
+    <menu><button type="button" data-close id="q-cancel">取消</button><button type="submit" class="primary">確定</button></menu>
+  </form>
+</dialog>
+
+<dialog id="spdlg" class="glass">
+  <form method="dialog" id="spform">
+    <h3 id="sp-title">設定密碼</h3>
+    <label id="sp-old-wrap">目前的密碼<input name="old" type="password" autocomplete="current-password"></label>
+    <label id="sp-new-wrap">新密碼（至少 6 個字）<input name="nw" type="password" autocomplete="new-password"></label>
+    <label id="sp-new2-wrap">再輸入一次<input name="nw2" type="password" autocomplete="new-password"></label>
+    <p class="hint" id="sp-hint"></p>
+    <p id="sperr" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary" id="sp-ok">確定</button></menu>
+  </form>
+</dialog>
+
 <dialog id="sdlg" class="glass">
   <form method="dialog" id="sform">
     <h3>設定</h3>
@@ -326,6 +384,20 @@
 
     <h4>關於</h4>
     <p class="hint">MoneyPi 由 hankyleisplay 製作，以 GPL-3.0 授權釋出。專案與授權全文：github.com/hankyleisplay/moneypi。程式顯示的數字與預估僅供記帳參考，不構成投資建議。</p>
+
+    <div class="desk-only" hidden>
+      <h4>安全性</h4>
+      <div class="row"><span class="muted" id="pw-state"></span><div class="btns"><button type="button" id="pw-btn">設定密碼</button><button type="button" id="pw-off" hidden>關閉密碼</button></div></div>
+      <p class="hint">設定後資料檔會加密儲存（XChaCha20-Poly1305），每次開啟 MoneyPi 都要輸入密碼，手機連線也要等電腦解鎖。<b>忘記密碼就無法救回資料</b>，請保管好；自動備份也會是加密的。</p>
+
+      <h4>自動備份</h4>
+      <label class="chk"><input id="bk-on" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>每天自動備份資料檔</span></label>
+      <label>備份資料夾（留空使用預設位置）<input id="bk-dir" placeholder="例如 D:\MoneyPiBackup 或 OneDrive 資料夾" autocomplete="off"></label>
+      <div class="row"><span class="muted">保留最近幾份</span>
+        <div class="seg" id="bk-keep"><button type="button" data-k="7">7</button><button type="button" data-k="14">14</button><button type="button" data-k="30">30</button></div></div>
+      <p class="hint" id="bk-info"></p>
+      <div class="btns"><button type="button" id="bk-now">立即備份</button><button type="button" id="bk-open">開啟備份資料夾</button></div>
+    </div>
 
     <h4>備份與還原</h4>
     <div class="row"><span class="muted">完整備份（JSON）</span><div class="btns"><button type="button" id="backup-btn">匯出備份</button><button type="button" id="restore-btn">還原備份</button></div></div>

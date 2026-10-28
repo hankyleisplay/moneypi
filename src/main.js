@@ -69,7 +69,7 @@ function askPin(msg) {
 
 let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_min: 0, cashflow: [] };
 const ui = {
-  kind: "all", cat: "", q: "", sort: "value", range: 0, fcRange: "1y", sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
+  kind: "all", cat: "", q: "", sort: "value", range: 0, fcRange: "1y", rm: new Date().toLocaleDateString("sv-SE").slice(0, 7), sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
   hidden: store.get("hidden", "0") === "1",
 };
 
@@ -189,7 +189,9 @@ ddSort.setOptions([
 ], "value");
 const fCat = new Dropdown($("f-cat"));
 const fCur = new Dropdown($("f-cur"));
-const fMkt = new Dropdown($("f-mkt"), () => updateHoldHint());
+const fMkt = new Dropdown($("f-mkt"), () => { updateHoldHint(); syncDivUI(); });
+const fDivCash = new Dropdown($("f-divcash"));
+function syncDivUI() { $("div-fields").hidden = !(form.holding.checked && fMkt.value); }
 const tKind = new Dropdown($("t-kind"), () => syncTxUI());
 const tCash = new Dropdown($("t-cash"), () => syncTxUI());
 fCat.setOptions(CATS, CATS[0]);
@@ -456,6 +458,7 @@ function renderList() {
   const xs = visibleAssets();
   $("nav-overview").classList.toggle("on", ui.sel === null);
   $("nav-flow").classList.toggle("on", ui.sel === "flow");
+  $("nav-report").classList.toggle("on", ui.sel === "report");
   $("empty").hidden = xs.length > 0;
   $("empty").textContent = data.assets.length ? "沒有符合條件的項目" : "尚無項目，按下方「新增項目」開始記錄";
   $("list").innerHTML = xs
@@ -719,12 +722,14 @@ function holdingHtml(a) {
 
 function renderView() {
   const a = typeof ui.sel === "number" ? data.assets.find((x) => x.id === ui.sel) : null;
-  const flow = ui.sel === "flow";
-  $("view-overview").hidden = !!a || flow;
+  const flow = ui.sel === "flow", report = ui.sel === "report";
+  $("view-overview").hidden = !!a || flow || report;
   $("view-detail").hidden = !a;
   $("view-flow").hidden = !flow;
-  $("title").textContent = a ? a.name : flow ? "記帳" : "總覽";
+  $("view-report").hidden = !report;
+  $("title").textContent = a ? a.name : flow ? "記帳" : report ? "月報" : "總覽";
   if (flow) return renderFlow();
+  if (report) return renderReport();
   if (!a) return drawCharts();
 
   const pool = sum(data.assets.filter((x) => x.liability === a.liability));
@@ -758,6 +763,7 @@ function select(id) {
 }
 $("nav-overview").onclick = () => select(null);
 $("nav-flow").onclick = () => select("flow");
+$("nav-report").onclick = () => select("report");
 $("list").onclick = (e) => {
   const b = e.target.closest(".item");
   if (b) select(Number(b.dataset.id));
@@ -961,6 +967,7 @@ function updateHoldHint() {
 
 function syncHoldingUI() {
   const on = form.holding.checked;
+  if ($("div-fields")) syncDivUI();
   $("holding-fields").hidden = !on;
   $("value-wrap").hidden = on;
   form.value.required = !on;
@@ -996,7 +1003,11 @@ function openDialog(asset) {
     form.price.value = asset.price || "";
     form.cost.value = asset.cost || "";
   }
+  form.autodiv.checked = asset ? asset.auto_div !== false : true;
+  fDivCash.setOptions([{ value: "0", label: "外部資金（不動用 App 內存款）" },
+    ...data.assets.filter((x) => !x.holding && !x.liability && x.id !== editingId).map((c) => ({ value: String(c.id), label: `${c.name}（${c.currency}）` }))], asset ? String(asset.div_cash || 0) : "0");
   syncHoldingUI();
+  syncDivUI();
   dlg.showModal();
   form.name.focus();
 }
@@ -1025,6 +1036,8 @@ form.onsubmit = async (e) => {
         quantity: holding ? num(form.quantity.value) : 0,
         price: holding ? num(form.price.value) : 0,
         cost: holding ? num(form.cost.value) : 0,
+        auto_div: form.autodiv.checked,
+        div_cash: Number(fDivCash.value) || 0,
       },
     });
     dlg.close();
@@ -1032,6 +1045,7 @@ form.onsubmit = async (e) => {
     render();
     toast(wasNew ? "已新增" : "已更新");
     if (market) doRefresh(false);
+    runDividends(false);
   } catch (err) {
     $("err").textContent = String(err);
   }
@@ -1185,6 +1199,36 @@ async function runPlans(announce) {
   } catch (err) { if (announce) toast(String(err)); }
 }
 
+/* ---------- password prompt / lock ---------- */
+const qdlg = $("qdlg"), qform = $("qform");
+// Resolves with the typed password, or null when cancelled.
+function askPassword(title, msg, { cancelable = true, err = "" } = {}) {
+  $("q-title").textContent = title;
+  $("q-msg").textContent = msg;
+  $("qerr").textContent = err;
+  qform.reset();
+  $("q-cancel").hidden = !cancelable;
+  qdlg.oncancel = cancelable ? null : (e) => e.preventDefault();
+  qdlg.dataset.ok = "";
+  return new Promise((res) => {
+    qdlg.addEventListener("close", () => res(qdlg.dataset.ok ? qform.pw.value : null), { once: true });
+    qdlg.showModal();
+    qform.pw.focus();
+  });
+}
+qform.addEventListener("submit", () => { qdlg.dataset.ok = "1"; });
+
+async function unlockFlow() {
+  let err = "";
+  for (;;) {
+    const pw = await askPassword("MoneyPi 已鎖定", "請輸入密碼解鎖。", { cancelable: false, err });
+    try { await invoke("unlock", { password: pw }); return; } catch (e) { err = String(e); }
+  }
+}
+$("lock-btn").onclick = async () => {
+  try { await invoke("lock"); location.reload(); } catch (err) { toast(String(err)); }
+};
+
 /* ---------- help + guided tour ---------- */
 $("help-btn").onclick = () => $("hdlg").showModal();
 $("h-tour").onclick = () => { $("hdlg").close(); setTimeout(startTour, 250); };
@@ -1195,6 +1239,7 @@ const TOUR = [
   { sel: "#list", t: "你的項目清單", d: "新增的項目會列在這裡，點一下看詳細：現值、成本、損益、交易記錄、定期定額和走勢預測。" },
   { sel: "#nav-overview", t: "總覽", d: "看淨資產走勢、資產配置、投資組合與目標進度，也可以在這裡設定多個目標。" },
   { sel: "#nav-flow", t: "記帳", d: "記錄每天的收入與支出，查看每月統計。" },
+  { sel: "#nav-report", t: "月報", d: "每個月一份：淨資產變多少、存了多少、買賣與配息、各目標的進度，以及預估何時達成。" },
   { sel: "#refresh-btn", t: "同步股價與匯率", d: "有設定行情代號的股票、ETF 會抓最新報價，外幣也會更新匯率。自動更新的間隔在「設定」裡調整。" },
   { sel: "#hide-btn", t: "隱藏金額", d: "在公共場合想遮住數字，就按這裡。" },
   { sel: "#phone-btn", t: "手機連線", d: "用手機查看同一份資料：同一個 Wi-Fi 掃 QR Code，或用「遠端」在外面也能連。" },
@@ -1254,6 +1299,81 @@ $("tour-card").onclick = (e) => {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("tour").matches(":popover-open")) endTour(); });
 addEventListener("resize", () => { if ($("tour").matches(":popover-open")) drawTour(); });
 
+// Dividends reported by the quote source (desktop app only; runs after the plans).
+async function runDividends(announce) {
+  if (!inTauri || !data.assets.some((a) => a.holding && a.auto_div && a.market)) return;
+  try {
+    const r = await invoke("run_dividends");
+    data = r.data;
+    if (r.added) { render(); toast(`已自動記錄 ${r.added} 筆配息`); }
+    else if (announce) toast("目前沒有新的配息");
+  } catch (err) { if (announce) toast(String(err)); }
+}
+
+/* ---------- security + automatic backup (settings) ---------- */
+let secState = { encrypted: false };
+async function refreshSecurity() {
+  if (!inTauri) return;
+  try {
+    secState = await invoke("lock_status");
+    $("pw-state").textContent = secState.encrypted ? "🔒 已啟用密碼保護（資料檔已加密）" : "尚未設定密碼（資料檔為明文）";
+    $("pw-btn").textContent = secState.encrypted ? "變更密碼" : "設定密碼";
+    $("pw-off").hidden = !secState.encrypted;
+    $("lock-btn").hidden = !secState.encrypted;
+    showBackup(await invoke("backup_info"));
+  } catch (err) { $("serr").textContent = String(err); }
+}
+function showBackup(i) {
+  $("bk-on").checked = i.on;
+  $("bk-dir").value = i.dir;
+  [...$("bk-keep").children].forEach((b) => b.classList.toggle("on", Number(b.dataset.k) === i.keep));
+  $("bk-info").textContent = `${i.on ? "已開啟" : "未開啟"}・位置：${i.path}・目前 ${i.count} 份${i.files.length ? `，最近：${i.files[0].replace("moneypi-", "").replace(".json", "")}` : ""}`;
+}
+async function saveBackup(patch = {}) {
+  try {
+    const cur = { on: $("bk-on").checked, dir: $("bk-dir").value.trim(), keep: Number([...$("bk-keep").children].find((b) => b.classList.contains("on"))?.dataset.k || 14), ...patch };
+    showBackup(await invoke("set_backup", cur));
+    $("serr").textContent = "";
+  } catch (err) { $("serr").textContent = String(err); refreshSecurity(); }
+}
+$("bk-on").onchange = () => saveBackup();
+$("bk-dir").onchange = () => saveBackup();
+$("bk-keep").onclick = (e) => { const b = e.target.closest("button"); if (b) saveBackup({ keep: Number(b.dataset.k) }); };
+$("bk-now").onclick = async () => {
+  try { const r = await invoke("backup_now"); showBackup(r.info); toast("已備份：" + r.name); } catch (err) { $("serr").textContent = String(err); }
+};
+$("bk-open").onclick = () => invoke("open_external", { target: "backups" }).catch((err) => ($("serr").textContent = String(err)));
+
+const spdlg = $("spdlg"), spform = $("spform");
+let spMode = "set";
+function openPassword(mode) {
+  spMode = mode;
+  spform.reset();
+  $("sperr").textContent = "";
+  $("sp-title").textContent = { set: "設定密碼", change: "變更密碼", off: "關閉密碼" }[mode];
+  $("sp-old-wrap").hidden = mode === "set";
+  $("sp-new-wrap").hidden = $("sp-new2-wrap").hidden = mode === "off";
+  $("sp-hint").textContent = mode === "off" ? "關閉後資料檔會改回明文儲存。" : "忘記密碼就無法救回資料，MoneyPi 也無法幫你重設，請務必記好。建議同時保留一份你信任的備份。";
+  spdlg.showModal();
+  (mode === "set" ? spform.nw : spform.old).focus();
+}
+$("pw-btn").onclick = () => openPassword(secState.encrypted ? "change" : "set");
+$("pw-off").onclick = () => openPassword("off");
+spform.onsubmit = async (e) => {
+  e.preventDefault();
+  const f = spform;
+  if (spMode !== "off") {
+    if (f.nw.value.length < 6) return ($("sperr").textContent = "密碼至少 6 個字");
+    if (f.nw.value !== f.nw2.value) return ($("sperr").textContent = "兩次輸入的密碼不一樣");
+  }
+  try {
+    await invoke("set_password", { old: spMode === "set" ? "" : f.old.value, new: spMode === "off" ? "" : f.nw.value });
+    spdlg.close();
+    toast(spMode === "off" ? "已關閉密碼" : "已儲存密碼，下次開啟需要輸入");
+    refreshSecurity();
+  } catch (err) { $("sperr").textContent = String(err); }
+};
+
 /* ---------- settings dialog ---------- */
 const sdlg = $("sdlg"), sform = $("sform");
 let refreshSel = 0;
@@ -1286,7 +1406,7 @@ async function openSettings() {
     } catch (e) { $("upd-status").textContent = String(e); }
   }
 }
-$("settings-btn").onclick = openSettings;
+$("settings-btn").onclick = () => { refreshSecurity(); openSettings(); };
 $("rates").onclick = (e) => e.target.matches("[data-rm]") && e.target.closest(".rate-row").remove();
 
 sform.onsubmit = async (e) => {
@@ -1535,6 +1655,102 @@ function renderFlow() {
         <button class="link danger" data-delflow="${f.id}">刪除</button></div>`).join("")
     : '<p class="muted">沒有記錄，按右上角「記一筆」開始記帳。</p>';
 }
+/* ---------- monthly report ---------- */
+const lastDayOf = (ym) => { const [y, m] = ym.split("-").map(Number); return `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2, "0")}`; };
+
+// What happened to one holding in a month (average-cost replay, original currency).
+function monthTrades(a, ym) {
+  const r = { buy: 0, sell: 0, div: 0, realized: 0 };
+  let q = 0, c = 0;
+  [...a.txs].sort((x, y) => x.date.localeCompare(y.date)).forEach((t) => {
+    const inM = t.date.startsWith(ym);
+    if (t.kind === "buy") {
+      q += t.units; c += t.units * t.price + t.fee;
+      if (inM) r.buy += t.units * t.price + t.fee;
+    } else if (t.kind === "sell") {
+      const avg = q > 0 ? c / q : 0, sold = Math.min(t.units, q);
+      if (inM) { r.sell += t.units * t.price - t.fee; r.realized += sold * t.price - t.fee - sold * avg; }
+      c -= sold * avg; q -= sold;
+    } else if (t.kind === "div" && inM) r.div += t.price;
+  });
+  return r;
+}
+
+function renderReport() {
+  const ym = ui.rm, first = ym + "-01", last = lastDayOf(ym), thisYm = todayStr().slice(0, 7), cur = ym === thisYm, m = mask();
+  $("rm-label").textContent = ym.replace("-", " 年 ") + " 月";
+  $("rm-next").disabled = ym >= thisYm;
+  const tile = (k, v, cls = "", sub = "") => `<div class="stat ${cls}"><span>${k}</span><b class="${m}">${v}</b>${sub ? `<small>${sub}</small>` : ""}</div>`;
+
+  // net worth at the start and end of the month
+  const nw = (s) => s.assets - s.liabilities;
+  const snaps = data.snapshots, before = snaps.filter((s) => s.date < first).at(-1), inMonth = snaps.filter((s) => s.date.startsWith(ym));
+  const netNow = sum(data.assets.filter((a) => !a.liability)) - sum(data.assets.filter((a) => a.liability));
+  const startV = before ? nw(before) : inMonth.length ? nw(inMonth[0]) : null;
+  const endV = cur ? netNow : inMonth.length ? nw(inMonth.at(-1)) : before ? nw(before) : null;
+  const flows = (data.cashflow || []).filter((f) => f.date.startsWith(ym));
+  const inc = flows.filter((f) => f.kind === "in").reduce((t, f) => t + f.amount, 0), out = flows.filter((f) => f.kind === "out").reduce((t, f) => t + f.amount, 0);
+
+  let tiles = "", note = "";
+  if (startV === null || endV === null) note = "這個月沒有資產紀錄（MoneyPi 每天開啟時會記錄一次淨資產）。";
+  else {
+    const d = endV - startV;
+    tiles += tile(before ? "月初淨資產" : "起算淨資產", money(startV)) + tile(cur ? "目前淨資產" : "月底淨資產", money(endV)) +
+      tile("本月變動", `${signed(d)}`, d >= 0 ? "up" : "down", startV ? `${signed((d / Math.abs(startV)) * 100, fmt)}%` : "");
+    if (!before) note = `資產紀錄從 ${inMonth[0].date} 才開始，所以以這天作為起點。`;
+  }
+  if (flows.length) {
+    tiles += tile("記帳收入", money(inc), "up") + tile("記帳支出", money(out), "down") + tile("記帳結餘", money(inc - out), inc - out >= 0 ? "up" : "down");
+    if (startV !== null && endV !== null) {
+      const est = endV - startV - (inc - out);
+      tiles += tile("估計投資與其他變動", signed(est), est >= 0 ? "up" : "down", "淨資產變動 − 記帳結餘");
+    }
+  } else if (startV !== null) note += (note ? " " : "") + "這個月沒有記帳資料；到「記帳」記錄收支，月報就能算出存了多少、投資賺賠多少。";
+  $("rp-sum").innerHTML = tiles;
+  $("rp-note").textContent = note;
+
+  // investments
+  const rows = data.assets.filter((a) => a.holding).map((a) => ({ a, t: monthTrades(a, ym), f: rate(a.currency) }))
+    .filter(({ t }) => t.buy || t.sell || t.div);
+  const tot = rows.reduce((s, { t, f }) => ({ buy: s.buy + t.buy * f, sell: s.sell + t.sell * f, div: s.div + t.div * f, realized: s.realized + t.realized * f }), { buy: 0, sell: 0, div: 0, realized: 0 });
+  const unreal = data.assets.filter((a) => a.holding && a.cost > 0 && a.quantity > 0).reduce((s, a) => s + (a.value - a.cost) * rate(a.currency), 0);
+  $("rp-inv").innerHTML = (rows.length
+    ? `<table class="rp-tbl"><thead><tr><th>標的</th><th>買入</th><th>賣出</th><th>已實現損益</th><th>配息</th></tr></thead><tbody>${rows.map(({ a, t, f }) =>
+      `<tr><td>${esc(a.name)}</td><td class="${m}">${t.buy ? fmt0.format(t.buy * f) : "—"}</td><td class="${m}">${t.sell ? fmt0.format(t.sell * f) : "—"}</td>
+        <td class="${m} ${t.sell ? (t.realized >= 0 ? "pos" : "neg") : ""}">${t.sell ? signed(t.realized * f) : "—"}</td><td class="${m}">${t.div ? fmt0.format(t.div * f) : "—"}</td></tr>`).join("")}
+      <tr><td><b>合計（TWD）</b></td><td class="${m}"><b>${fmt0.format(tot.buy)}</b></td><td class="${m}"><b>${fmt0.format(tot.sell)}</b></td><td class="${m}"><b>${tot.sell ? signed(tot.realized) : "—"}</b></td><td class="${m}"><b>${fmt0.format(tot.div)}</b></td></tr></tbody></table>`
+    : '<p class="muted">這個月沒有買賣或配息記錄。</p>')
+    + (cur && data.assets.some((a) => a.holding && a.cost > 0) ? `<p class="hint">目前所有持倉的未實現損益：<b class="${unreal >= 0 ? "pos" : "neg"} ${m}">${signed(unreal)} TWD</b>（金額以目前匯率折算，買入含手續費）</p>` : "");
+
+  // goals
+  const goalAt = (g, date) => g.history.filter((p) => p.date <= date).at(-1);
+  $("rp-goals").innerHTML = data.goals.length ? data.goals.map((g) => {
+    const info = goalInfo(g);
+    const endVal = cur ? info.cur : goalAt(g, last)?.value ?? null;
+    const s0 = g.history.filter((p) => p.date < first).at(-1) || g.history.find((p) => p.date.startsWith(ym));
+    const delta = endVal !== null && s0 ? endVal - s0.value : null;
+    const pct = endVal === null ? null : Math.max(0, (endVal / g.amount) * 100);
+    let extra = "";
+    if (cur && !info.done) {
+      extra = info.eta === "資料不足" ? "預估達成時間：資料不足，需要再累積幾天的紀錄。" : `預估 ${info.eta}${info.etaSub ? "（" + info.etaSub + "）" : ""} 達成。`;
+      if (g.date) extra += info.late ? " 已超過目標日期。" : info.need !== undefined ? ` 距目標日期還有 ${info.leftText}，每月需增加約 ${fmt0.format(info.need)}${info.ahead === undefined ? "" : info.ahead ? "，目前速度趕得上" : "，目前速度會落後"}。` : "";
+    }
+    return `<div class="rp-goal"><div class="top"><b>${esc(g.icon)} ${esc(g.name)}</b><span class="${m}">${endVal === null ? "—" : `${fmt0.format(endVal)} / ${fmt0.format(g.amount)}（${pct.toFixed(1)}%）`}</span></div>
+      <div class="progress"><div style="width:${Math.min(100, pct || 0)}%"></div></div>
+      <small class="muted ${m}">${delta === null ? "本月沒有可比較的紀錄" : `本月 ${signed(delta)}`}${extra ? "　" + esc(extra) : ""}</small></div>`;
+  }).join("") : '<p class="muted">還沒有目標。到「總覽」新增目標後，這裡會顯示每月進度。</p>';
+
+  // spending
+  const byCat = {};
+  flows.filter((f) => f.kind === "out").forEach((f) => (byCat[f.category] = (byCat[f.category] || 0) + f.amount));
+  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  $("rp-cats").innerHTML = cats.length ? cats.map(([c, v], i) => `<div class="bar-row"><span>${esc(c)}</span>
+      <span class="bar-track"><span class="bar-fill" style="display:block;width:${(v / out) * 100}%;background:${COLORS[i % COLORS.length]}"></span></span>
+      <span class="${m}">${fmt0.format(v)} <span class="muted">${((v / out) * 100).toFixed(0)}%</span></span></div>`).join("") : '<p class="muted">這個月沒有支出記錄。</p>';
+}
+$("rm-prev").onclick = () => { ui.rm = shiftMonth(ui.rm, -1); renderReport(); };
+$("rm-next").onclick = () => { if (ui.rm < todayStr().slice(0, 7)) { ui.rm = shiftMonth(ui.rm, 1); renderReport(); } };
+
 $("fm-prev").onclick = () => { ui.fm = shiftMonth(ui.fm, -1); renderFlow(); };
 $("fm-next").onclick = () => { ui.fm = shiftMonth(ui.fm, 1); renderFlow(); };
 $("flow-list").onclick = async (e) => {
@@ -1596,7 +1812,17 @@ $("restore-file").onchange = async (e) => {
   if (!f) return;
   if (!(await confirmBox("還原備份？", "將以備份內容取代目前所有資料（原資料會自動另存為 moneypi.before-restore.json）", "還原"))) return;
   try {
-    data = await invoke("import_backup", { text: await f.text() });
+    const text = await f.text();
+    let password, again = "";
+    for (;;) {
+      try { data = await invoke("import_backup", { text, password }); break; }
+      catch (err) {
+        if (String(err) !== "ENCRYPTED" && !String(err).includes("密碼錯誤")) throw err;
+        password = await askPassword("這是加密的備份", "請輸入建立這份備份時的密碼。", { err: String(err) === "ENCRYPTED" ? "" : again });
+        if (password === null) return;
+        again = "密碼錯誤，請再試一次";
+      }
+    }
     ui.sel = null;
     render();
     toast("已還原備份");
@@ -1854,17 +2080,25 @@ document.addEventListener("input", (e) => {
 
 /* ---------- boot ---------- */
 document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !inTauri));
-invoke("get_data")
-  .then((d) => {
-    data = d;
-    render();
-    scheduleRefresh();
-    if (inTauri && data.refresh_min > 0) doRefresh(false);
-    runPlans(false);
-    setInterval(() => runPlans(false), 3600e3);
-    if (store.get("toured", "0") !== "1") setTimeout(startTour, 1200);
-  })
-  .catch((err) => toast(String(err)));
+async function boot() {
+  const st = await invoke("lock_status");
+  $("lock-btn").hidden = !(inTauri && st.encrypted);
+  if (st.locked) {
+    if (!inTauri) {
+      document.body.innerHTML = '<p style="margin:40px 20px;font:16px sans-serif">電腦上的 MoneyPi 已鎖定。請先在電腦輸入密碼解鎖，再重新整理這個頁面。</p>';
+      return;
+    }
+    await unlockFlow();
+  }
+  data = await invoke("get_data");
+  render();
+  scheduleRefresh();
+  if (inTauri && data.refresh_min > 0) doRefresh(false);
+  runPlans(false).then(() => runDividends(false));
+  setInterval(() => runPlans(false).then(() => runDividends(false)), 3600e3);
+  if (store.get("toured", "0") !== "1") setTimeout(startTour, 1200);
+}
+boot().catch((err) => toast(String(err)));
 if (inTauri) {
   invoke("get_sync").then(showPhone).catch(() => {});
   setTimeout(() => checkUpdate(false), 4000);

@@ -86,6 +86,19 @@ struct Asset {
     price_updated: String,
     #[serde(default)]
     txs: Vec<Tx>,
+    /// Record dividends from the quote source automatically (holdings with a market symbol).
+    #[serde(default = "yes")]
+    auto_div: bool,
+    /// Deposit that automatic dividends are paid into; 0 = outside the app.
+    #[serde(default)]
+    div_cash: u64,
+    /// Ex-dividend dates already handled, so a deleted automatic dividend does not come back.
+    #[serde(default)]
+    div_seen: Vec<String>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -199,6 +212,18 @@ struct Data {
     plans: Vec<Plan>,
     #[serde(default)]
     next_plan: u64,
+    /// Daily copy of the data file (encrypted too, when a password is set).
+    #[serde(default)]
+    backup_on: bool,
+    /// Empty = the "backups" folder next to the data file.
+    #[serde(default)]
+    backup_dir: String,
+    #[serde(default = "default_keep")]
+    backup_keep: u32,
+}
+
+fn default_keep() -> u32 {
+    14
 }
 
 impl Default for Data {
@@ -220,6 +245,9 @@ impl Default for Data {
             next_flow: 0,
             plans: vec![],
             next_plan: 0,
+            backup_on: false,
+            backup_dir: String::new(),
+            backup_keep: default_keep(),
         }
     }
 }
@@ -377,6 +405,17 @@ fn validate_flow(f: &Flow) -> Result<(), String> {
     Ok(())
 }
 
+fn backup_files(dir: &Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| n.starts_with("moneypi-") && n.ends_with(".json") && n.len() == "moneypi-2026-01-01.json".len())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn r4(x: f64) -> f64 {
     (x * 10_000.0).round() / 10_000.0
 }
@@ -432,6 +471,82 @@ fn validate_tx(t: &Tx) -> Result<(), String> {
     }
 }
 
+// ------------------------------------------------------------ encryption at rest
+
+#[derive(Default)]
+struct EncState {
+    /// The data file on disk is an encrypted envelope.
+    encrypted: bool,
+    key: Option<[u8; 32]>,
+    salt: Vec<u8>,
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 || !s.is_ascii() {
+        return None;
+    }
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok()).collect()
+}
+
+fn kdf(pw: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+    let mut k = [0u8; 32];
+    argon2::Argon2::default().hash_password_into(pw.as_bytes(), salt, &mut k).map_err(|e| format!("金鑰衍生失敗：{e}"))?;
+    Ok(k)
+}
+
+fn seal(key: &[u8; 32], salt: &[u8], plain: &[u8]) -> Result<String, String> {
+    use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
+    let mut nonce = [0u8; 24];
+    getrandom::getrandom(&mut nonce).map_err(|e| e.to_string())?;
+    let ct = XChaCha20Poly1305::new(key.into()).encrypt(XNonce::from_slice(&nonce), plain).map_err(|_| "加密失敗".to_string())?;
+    Ok(json!({ "moneypi_enc": 1, "kdf": "argon2id", "cipher": "xchacha20poly1305", "salt": hex(salt), "nonce": hex(&nonce), "ct": hex(&ct) }).to_string())
+}
+
+fn is_envelope(text: &str) -> bool {
+    serde_json::from_str::<Value>(text).ok().is_some_and(|v| v.get("moneypi_enc").is_some())
+}
+
+/// Decrypt an envelope; returns the plaintext, the derived key and the salt.
+fn open_envelope(text: &str, pw: &str) -> Result<(Vec<u8>, [u8; 32], Vec<u8>), String> {
+    use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
+    let v: Value = serde_json::from_str(text).map_err(|_| "檔案格式錯誤".to_string())?;
+    let field = |k: &str| v[k].as_str().and_then(unhex).ok_or_else(|| "加密檔案格式錯誤".to_string());
+    let (salt, nonce, ct) = (field("salt")?, field("nonce")?, field("ct")?);
+    if nonce.len() != 24 || salt.len() < 8 {
+        return Err("加密檔案格式錯誤".into());
+    }
+    let key = kdf(pw, &salt)?;
+    let plain = XChaCha20Poly1305::new((&key).into())
+        .decrypt(XNonce::from_slice(&nonce), ct.as_ref())
+        .map_err(|_| "密碼錯誤".to_string())?;
+    Ok((plain, key, salt))
+}
+
+/// Read the data file. A missing file starts empty; an unreadable one is kept aside, never overwritten silently.
+fn load_state(path: &Path) -> (Data, EncState) {
+    let Ok(text) = fs::read_to_string(path) else { return (Data::default(), EncState::default()) };
+    if is_envelope(&text) {
+        let salt = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["salt"].as_str().and_then(unhex)).unwrap_or_default();
+        return (Data::default(), EncState { encrypted: true, key: None, salt });
+    }
+    match serde_json::from_str::<Data>(&text) {
+        Ok(mut d) => {
+            migrate(&mut d);
+            (d, EncState::default())
+        }
+        Err(e) => {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+            let _ = fs::copy(path, path.with_extension(format!("corrupt-{stamp}.json")));
+            eprintln!("資料檔無法讀取，已另存一份：{e}");
+            (Data::default(), EncState::default())
+        }
+    }
+}
+
 // ------------------------------------------------------------------ the core
 
 struct Core {
@@ -445,6 +560,7 @@ struct Core {
     progress: Mutex<Progress>,
     /// Held while recurring plans are being booked so two clients cannot book the same period twice.
     plan_lock: Mutex<()>,
+    enc: Mutex<EncState>,
 }
 
 #[derive(Default, Clone)]
@@ -613,6 +729,65 @@ fn open_external(target: &str) -> Result<(), String> {
 
 // ---------------------------------------------------------- price history
 
+/// Cash dividends per share as (ex-dividend date, amount), oldest first.
+fn fetch_dividends(symbol: &str, market: &str, from: &str) -> Result<Vec<(String, f64)>, String> {
+    let day = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d").map_err(|e| e.to_string())?;
+    let t0 = (day - chrono::Duration::days(3)).and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+    let t1 = (chrono::Local::now().date_naive() + chrono::Duration::days(2)).and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+    let q = format!("period1={t0}&period2={t1}&interval=1mo&events=div");
+    let one = |sym: String| -> Result<Vec<(String, f64)>, String> {
+        let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{}?{q}", percent_encode(&sym));
+        let v: Value = ureq::get(&url)
+            .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MoneyPi")
+            .timeout(Duration::from_secs(15))
+            .call()
+            .map_err(|e| format!("連線失敗：{e}"))?
+            .into_json()
+            .map_err(|e| format!("回應格式錯誤：{e}"))?;
+        let r = &v["chart"]["result"][0];
+        if r.is_null() {
+            return Err("查無資料".into());
+        }
+        let off = r["meta"]["gmtoffset"].as_i64().unwrap_or(0);
+        let mut out: Vec<(String, f64)> = r["events"]["dividends"]
+            .as_object()
+            .map(|m| {
+                m.values()
+                    .filter_map(|e| {
+                        let (t, a) = (e["date"].as_i64()?, e["amount"].as_f64()?);
+                        Some((chrono::DateTime::from_timestamp(t + off, 0)?.format("%Y-%m-%d").to_string(), r4(a)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    };
+    if market == "tw" {
+        one(format!("{symbol}.TW")).or_else(|_| one(format!("{symbol}.TWO")))
+    } else {
+        one(symbol.to_string())
+    }
+}
+
+/// Dividend events not handled yet, with the units held the day before the ex-date.
+fn dividend_candidates(txs: &[Tx], events: &[(String, f64)], seen: &[String]) -> Vec<(String, f64, f64)> {
+    let mut sorted: Vec<&Tx> = txs.iter().filter(|t| t.kind == "buy" || t.kind == "sell").collect();
+    sorted.sort_by(|a, b| a.date.cmp(&b.date));
+    events
+        .iter()
+        .filter(|(d, _)| !seen.contains(d))
+        .map(|(d, per)| {
+            let units: f64 = sorted
+                .iter()
+                .filter(|t| t.date.as_str() < d.as_str())
+                .map(|t| if t.kind == "buy" { t.units } else { -t.units })
+                .sum();
+            (d.clone(), units.max(0.0), *per)
+        })
+        .collect()
+}
+
 /// Daily closes from Yahoo as (YYYY-MM-DD, close), oldest first.
 fn fetch_chart(symbol: &str, query: &str) -> Result<(Vec<(String, f64)>, String), String> {
     let url = format!("https://query1.finance.yahoo.com/v8/finance/chart/{}?{query}", percent_encode(symbol));
@@ -673,7 +848,184 @@ impl Core {
 
     fn persist(&self, d: &Data) -> Result<(), String> {
         let json = serde_json::to_string_pretty(d).map_err(|e| e.to_string())?;
-        fs::write(&self.path, json).map_err(|e| e.to_string())
+        let out = {
+            let e = self.enc.lock().unwrap();
+            if e.encrypted {
+                // never write while locked: the in-memory data is just the empty placeholder
+                let key = e.key.ok_or("已鎖定，請先解鎖")?;
+                seal(&key, &e.salt, json.as_bytes())?
+            } else {
+                json
+            }
+        };
+        let tmp = self.path.with_extension("json.tmp");
+        fs::write(&tmp, out).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
+    }
+
+    fn is_locked(&self) -> bool {
+        let e = self.enc.lock().unwrap();
+        e.encrypted && e.key.is_none()
+    }
+
+    fn lock_status(&self) -> Value {
+        let e = self.enc.lock().unwrap();
+        json!({ "encrypted": e.encrypted, "locked": e.encrypted && e.key.is_none() })
+    }
+
+    fn unlock(self: &Arc<Self>, pw: &str) -> Result<Value, String> {
+        if !self.is_locked() {
+            return Ok(self.lock_status());
+        }
+        let text = fs::read_to_string(&self.path).map_err(|e| e.to_string())?;
+        let (plain, key, salt) = match open_envelope(&text, pw) {
+            Ok(x) => x,
+            Err(e) => {
+                thread::sleep(Duration::from_millis(500)); // slow down guessing
+                return Err(e);
+            }
+        };
+        let mut data: Data = serde_json::from_slice(&plain).map_err(|e| format!("資料格式錯誤：{e}"))?;
+        migrate(&mut data);
+        let (enabled, port) = (data.sync_enabled, data.sync_port);
+        *self.data.lock().unwrap() = data;
+        *self.enc.lock().unwrap() = EncState { encrypted: true, key: Some(key), salt };
+        if enabled {
+            let _ = self.start_server("0.0.0.0", port);
+        }
+        Ok(self.lock_status())
+    }
+
+    /// Lock the app again: save, forget the key and the data, and stop serving.
+    fn lock(&self) -> Result<Value, String> {
+        if !self.enc.lock().unwrap().encrypted {
+            return Err("尚未設定密碼".into());
+        }
+        {
+            let d = self.data.lock().unwrap();
+            self.persist(&d)?;
+        }
+        self.tunnel_stop();
+        self.stop_server();
+        self.enc.lock().unwrap().key = None;
+        *self.data.lock().unwrap() = Data::default();
+        Ok(self.lock_status())
+    }
+
+    /// Turn the password on, change it, or (empty `new`) turn it off. `old` is required once a password exists.
+    fn set_password(&self, old: &str, new: &str) -> Result<Value, String> {
+        let d = self.data.lock().unwrap();
+        {
+            let e = self.enc.lock().unwrap();
+            if e.encrypted {
+                let k = kdf(old, &e.salt)?;
+                let cur = e.key.ok_or("已鎖定，請先解鎖")?;
+                if k.iter().zip(cur.iter()).fold(0u8, |a, (x, y)| a | (x ^ y)) != 0 {
+                    drop(e);
+                    thread::sleep(Duration::from_millis(500));
+                    return Err("目前的密碼不正確".into());
+                }
+            }
+        }
+        if new.is_empty() {
+            if !self.enc.lock().unwrap().encrypted {
+                return Err("目前沒有設定密碼".into());
+            }
+            *self.enc.lock().unwrap() = EncState::default();
+        } else {
+            if new.chars().count() < 6 {
+                return Err("密碼至少 6 個字".into());
+            }
+            let mut salt = [0u8; 16];
+            getrandom::getrandom(&mut salt).map_err(|e| e.to_string())?;
+            let key = kdf(new, &salt)?;
+            *self.enc.lock().unwrap() = EncState { encrypted: true, key: Some(key), salt: salt.to_vec() };
+        }
+        self.persist(&d)?;
+        Ok(self.lock_status())
+    }
+
+    // ------------------------------------------------------------- backups
+
+    fn backup_path(&self, d: &Data) -> PathBuf {
+        if d.backup_dir.trim().is_empty() {
+            self.path.parent().map(|p| p.join("backups")).unwrap_or_else(|| PathBuf::from("backups"))
+        } else {
+            PathBuf::from(d.backup_dir.trim())
+        }
+    }
+
+    fn set_backup(&self, on: bool, dir: &str, keep: u32) -> Result<Value, String> {
+        let dir = dir.trim();
+        if !dir.is_empty() && !Path::new(dir).is_absolute() {
+            return Err("備份資料夾請填完整路徑，例如 D:\\MoneyPiBackup；留空則用預設位置".into());
+        }
+        if !(3..=60).contains(&keep) {
+            return Err("保留份數需介於 3 到 60".into());
+        }
+        {
+            let mut d = self.data.lock().unwrap();
+            d.backup_on = on;
+            d.backup_dir = dir.to_string();
+            d.backup_keep = keep;
+            self.persist(&d)?;
+        }
+        if on {
+            self.auto_backup(false)?;
+        }
+        Ok(self.backup_info())
+    }
+
+    /// Copy the data file into the backup folder once a day (or right now when `force`).
+    fn auto_backup(&self, force: bool) -> Result<Option<String>, String> {
+        if self.is_locked() {
+            return Ok(None);
+        }
+        let (on, dir, keep) = {
+            let d = self.data.lock().unwrap();
+            (d.backup_on, self.backup_path(&d), d.backup_keep.clamp(3, 60) as usize)
+        };
+        if !on && !force {
+            return Ok(None);
+        }
+        fs::create_dir_all(&dir).map_err(|e| format!("無法建立備份資料夾：{e}"))?;
+        let name = format!("moneypi-{}.json", today());
+        let target = dir.join(&name);
+        if target.exists() && !force {
+            return Ok(None);
+        }
+        if !self.path.exists() {
+            let d = self.data.lock().unwrap();
+            self.persist(&d)?;
+        }
+        fs::copy(&self.path, &target).map_err(|e| format!("備份失敗：{e}"))?;
+        let mut files = backup_files(&dir);
+        files.sort();
+        while files.len() > keep {
+            let _ = fs::remove_file(dir.join(files.remove(0)));
+        }
+        Ok(Some(name))
+    }
+
+    fn backup_info(&self) -> Value {
+        let d = self.data.lock().unwrap();
+        let dir = self.backup_path(&d);
+        let mut files = backup_files(&dir);
+        files.sort();
+        files.reverse();
+        json!({ "on": d.backup_on, "dir": d.backup_dir, "path": dir.display().to_string(), "keep": d.backup_keep,
+                "count": files.len(), "files": files.into_iter().take(5).collect::<Vec<_>>() })
+    }
+
+    fn open_backups(&self) -> Result<(), String> {
+        let dir = {
+            let d = self.data.lock().unwrap();
+            self.backup_path(&d)
+        };
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut c = Command::new("explorer");
+        c.arg(&dir);
+        c.spawn().map(|_| ()).map_err(|e| e.to_string())
     }
 
     fn save_goal(&self, mut g: Goal) -> Result<Value, String> {
@@ -750,7 +1102,15 @@ impl Core {
         serde_json::to_string_pretty(&d).unwrap_or_default()
     }
 
-    fn import_backup(&self, text: &str) -> Result<Value, String> {
+    fn import_backup(&self, text: &str, password: Option<&str>) -> Result<Value, String> {
+        let decrypted;
+        let text = if is_envelope(text) {
+            let pw = password.filter(|p| !p.is_empty()).ok_or("ENCRYPTED")?;
+            decrypted = String::from_utf8(open_envelope(text, pw)?.0).map_err(|_| "備份檔格式錯誤".to_string())?;
+            decrypted.as_str()
+        } else {
+            text
+        };
         let mut inc: Data = serde_json::from_str(text).map_err(|e| format!("備份檔格式錯誤：{e}"))?;
         migrate(&mut inc);
         if inc.rates.get(BASE) != Some(&1.0) || inc.rates.values().any(|r| !r.is_finite() || *r <= 0.0) {
@@ -767,6 +1127,9 @@ impl Core {
         inc.sync_enabled = d.sync_enabled;
         inc.sync_port = d.sync_port;
         inc.sync_pin = d.sync_pin.clone();
+        inc.backup_on = d.backup_on;
+        inc.backup_dir = d.backup_dir.clone();
+        inc.backup_keep = d.backup_keep;
         inc.next_id = inc.next_id.max(inc.assets.iter().map(|a| a.id).max().unwrap_or(0));
         inc.next_flow = inc.next_flow.max(inc.cashflow.iter().map(|f| f.id).max().unwrap_or(0));
         inc.next_goal = inc.next_goal.max(inc.goals.iter().map(|g| g.id).max().unwrap_or(0));
@@ -788,6 +1151,7 @@ impl Core {
             let old = d.assets.iter().find(|a| a.id == asset.id).ok_or("找不到該項目")?;
             asset.txs = old.txs.clone();
             asset.price_updated = old.price_updated.clone();
+            asset.div_seen = old.div_seen.clone();
             if asset.holding && asset.txs.is_empty() {
                 asset.realized = old.realized;
                 asset.dividends = old.dividends;
@@ -821,6 +1185,85 @@ impl Core {
         }
         self.commit(&mut d)?;
         Ok(view(&d))
+    }
+
+    /// Add the dividends the quote source reports for every holding with automatic dividends on.
+    fn run_dividends(&self) -> Result<Value, String> {
+        let _guard = self.plan_lock.lock().unwrap();
+        let today_s = today();
+        let targets: Vec<(u64, String, String, String)> = {
+            let d = self.data.lock().unwrap();
+            d.assets
+                .iter()
+                .filter(|a| a.holding && a.auto_div && !a.market.is_empty() && !a.symbol.trim().is_empty())
+                .filter_map(|a| {
+                    let first = a.txs.iter().filter(|t| t.kind == "buy").map(|t| t.date.clone()).min()?;
+                    Some((a.id, a.symbol.trim().to_string(), a.market.clone(), first))
+                })
+                .collect()
+        };
+        let (mut added, mut failed) = (0usize, 0usize);
+        for (id, sym, mkt, first) in targets {
+            let Ok(events) = fetch_dividends(&sym, &mkt, &first) else {
+                failed += 1;
+                continue;
+            };
+            let (txs, seen, cash) = {
+                let d = self.data.lock().unwrap();
+                match d.assets.iter().find(|a| a.id == id) {
+                    Some(a) => (a.txs.clone(), a.div_seen.clone(), a.div_cash),
+                    None => continue,
+                }
+            };
+            let mut handled = vec![];
+            for (date, units, per) in dividend_candidates(&txs, &events, &seen) {
+                if date.as_str() > today_s.as_str() {
+                    continue;
+                }
+                handled.push(date.clone());
+                if units <= 0.0 {
+                    continue;
+                }
+                let amount = ((units * per) * 100.0).round() / 100.0;
+                // the user may already have recorded this one by hand
+                let dup = txs.iter().filter(|t| t.kind == "div").any(|t| {
+                    let close = match (
+                        chrono::NaiveDate::parse_from_str(&t.date, "%Y-%m-%d"),
+                        chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d"),
+                    ) {
+                        (Ok(a), Ok(b)) => (a - b).num_days().abs() <= 45,
+                        _ => false,
+                    };
+                    close && (t.price - amount).abs() <= amount * 0.1 + 1.0
+                });
+                if dup || amount <= 0.0 {
+                    continue;
+                }
+                let tx = Tx {
+                    date: date.clone(),
+                    kind: "div".into(),
+                    units: 0.0,
+                    price: amount,
+                    fee: 0.0,
+                    note: format!("自動配息：每股 {} × {} 股（除息日，稅前）", per, units),
+                    cash,
+                    cash_delta: 0.0,
+                };
+                if self.add_tx(id, tx).is_ok() {
+                    added += 1;
+                } else {
+                    handled.pop();
+                }
+            }
+            if !handled.is_empty() {
+                let mut d = self.data.lock().unwrap();
+                if let Some(a) = d.assets.iter_mut().find(|a| a.id == id) {
+                    a.div_seen.extend(handled);
+                }
+                let _ = self.persist(&d);
+            }
+        }
+        Ok(json!({ "added": added, "failed": failed, "data": view(&self.data.lock().unwrap()) }))
     }
 
     fn save_plan(&self, mut p: Plan) -> Result<Value, String> {
@@ -1615,7 +2058,18 @@ fn arg<T: DeserializeOwned>(a: &Value, k: &str) -> Result<T, String> {
 /// Single entry point shared by the desktop webview (Tauri `call`) and LAN clients (HTTP).
 /// `remote` callers cannot change sync settings.
 fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Value, String> {
+    if core.is_locked() && !matches!(cmd, "lock_status" | "unlock") {
+        return Err("已鎖定：請先在電腦上輸入密碼解鎖".into());
+    }
     match cmd {
+        "lock_status" => Ok(core.lock_status()),
+        "unlock" if !remote => core.unlock(&arg::<String>(&args, "password")?),
+        "lock" if !remote => core.lock(),
+        "set_password" if !remote => core.set_password(&arg::<String>(&args, "old")?, &arg::<String>(&args, "new")?),
+        "backup_info" if !remote => Ok(core.backup_info()),
+        "set_backup" if !remote => core.set_backup(arg(&args, "on")?, &arg::<String>(&args, "dir")?, arg(&args, "keep")?),
+        "backup_now" if !remote => core.auto_backup(true).map(|n| json!({ "name": n, "info": core.backup_info() })),
+        "run_dividends" => core.run_dividends(),
         "get_data" => Ok(view(&core.data.lock().unwrap())),
         "save_asset" => core.save_asset(arg(&args, "asset")?),
         "delete_asset" => core.delete_asset(arg(&args, "id")?),
@@ -1630,11 +2084,14 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "add_flow" => core.add_flow(arg(&args, "flow")?),
         "delete_flow" => core.delete_flow(arg(&args, "id")?),
         "export_backup" => Ok(Value::String(core.export_backup())),
-        "import_backup" => core.import_backup(&arg::<String>(&args, "text")?),
+        "import_backup" => core.import_backup(&arg::<String>(&args, "text")?, args["password"].as_str()),
         "tunnel_status" if !remote => Ok(core.tunnel_status()),
         "tunnel_install" if !remote => core.tunnel_install(args["method"].as_str().unwrap_or("direct")),
         "tunnel_progress" if !remote => Ok(core.tunnel_progress()),
-        "open_external" if !remote => open_external(&arg::<String>(&args, "target")?).map(|_| Value::Null),
+        "open_external" if !remote => {
+            let t = arg::<String>(&args, "target")?;
+            if t == "backups" { core.open_backups() } else { open_external(&t) }.map(|_| Value::Null)
+        }
         "save_plan" => core.save_plan(arg(&args, "plan")?),
         "delete_plan" => core.delete_plan(arg(&args, "id")?),
         "run_plans" => core.run_plans(),
@@ -1829,13 +2286,9 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let path = dir.join("moneypi.json");
-            let data: Data = fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            let mut data = data;
-            migrate(&mut data);
-            let (enabled, port) = (data.sync_enabled, data.sync_port);
+            let (data, enc) = load_state(&path);
+            // a locked file is read after the password is entered
+            let (enabled, port) = (data.sync_enabled && !enc.encrypted, data.sync_port);
             let core = Arc::new(Core {
                 path,
                 data: Mutex::new(data),
@@ -1844,12 +2297,23 @@ pub fn run() {
                 auth_fail: Mutex::new((0, None)),
                 progress: Mutex::new(Progress::default()),
                 plan_lock: Mutex::new(()),
+                enc: Mutex::new(enc),
             });
             if enabled {
                 if let Err(e) = core.start_server("0.0.0.0", port) {
                     eprintln!("{e}");
                 }
             }
+            let c = core.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(20));
+                loop {
+                    if let Err(e) = c.auto_backup(false) {
+                        eprintln!("自動備份失敗：{e}");
+                    }
+                    thread::sleep(Duration::from_secs(1800));
+                }
+            });
             app.manage(core);
             Ok(())
         })
@@ -1978,6 +2442,7 @@ mod tests {
             auth_fail: Mutex::new((0, None)),
             progress: Mutex::new(Progress::default()),
             plan_lock: Mutex::new(()),
+            enc: Mutex::new(EncState::default()),
         }
     }
 
@@ -2080,6 +2545,110 @@ mod tests {
         assert!(!c.data.lock().unwrap().plans[1].status.is_empty());
         assert!(c.save_plan(Plan { asset: 2, amount: 100.0, fee: 100.0, day: 5, start: "2026-01-01".into(), ..Default::default() }).is_err());
         let _ = fs::remove_file(&c.path);
+    }
+
+    fn temp_core(tag: &str) -> Core {
+        let c = test_core();
+        Core { path: std::env::temp_dir().join(format!("moneypi-{tag}-{}.json", random_hex(4))), ..c }
+    }
+
+    #[test]
+    fn encryption_roundtrip_and_tamper_detection() {
+        let salt = [7u8; 16];
+        let key = kdf("secret1", &salt).unwrap();
+        let env = seal(&key, &salt, b"{\"hello\":1}").unwrap();
+        assert!(!env.contains("hello"));
+        assert_eq!(open_envelope(&env, "secret1").unwrap().0, b"{\"hello\":1}");
+        assert_eq!(open_envelope(&env, "wrong!").unwrap_err(), "密碼錯誤");
+        let mut v: Value = serde_json::from_str(&env).unwrap();
+        let ct = v["ct"].as_str().unwrap().to_string();
+        v["ct"] = Value::String(format!("{}{}", if ct.starts_with('0') { "1" } else { "0" }, &ct[1..]));
+        assert!(open_envelope(&v.to_string(), "secret1").is_err());
+        assert!(is_envelope(&env) && !is_envelope("{\"assets\":[]}"));
+    }
+
+    #[test]
+    fn password_locks_the_app_and_the_file_is_unreadable_without_it() {
+        let c = temp_core("pw");
+        let core = Arc::new(c);
+        core.data.lock().unwrap().assets.push(Asset { id: 1, name: "我的秘密存款".into(), currency: "TWD".into(), value: 123.0, ..Default::default() });
+        {
+            let d = core.data.lock().unwrap();
+            core.persist(&d).unwrap();
+        }
+        assert!(core.set_password("", "abc").is_err()); // too short
+        core.set_password("", "secret1").unwrap();
+        let on_disk = fs::read_to_string(&core.path).unwrap();
+        assert!(is_envelope(&on_disk) && !on_disk.contains("我的秘密存款"));
+        // changing needs the current password
+        assert!(core.set_password("nope", "another1").is_err());
+        core.lock().unwrap();
+        assert!(core.is_locked());
+        assert!(dispatch(&core, "get_data", Value::Null, false).is_err());
+        assert!(dispatch(&core, "save_asset", Value::Null, false).is_err());
+        assert!(core.persist(&core.data.lock().unwrap()).is_err()); // must not overwrite with the empty placeholder
+        assert!(core.unlock("bad-pass").is_err());
+        assert!(core.is_locked());
+        // a fresh start sees an encrypted file and stays locked
+        let (d0, e0) = load_state(&core.path);
+        assert!(e0.encrypted && e0.key.is_none() && d0.assets.is_empty());
+        core.unlock("secret1").unwrap();
+        assert_eq!(dispatch(&core, "get_data", Value::Null, false).unwrap()["assets"][0]["name"], "我的秘密存款");
+        // remote clients can never unlock or change the password
+        assert!(dispatch(&core, "set_password", json!({"old":"secret1","new":""}), true).is_err());
+        // turning it off writes plain JSON again
+        core.set_password("secret1", "").unwrap();
+        assert!(!is_envelope(&fs::read_to_string(&core.path).unwrap()));
+        let _ = fs::remove_file(&core.path);
+    }
+
+    #[test]
+    fn encrypted_backup_can_be_restored_with_its_password() {
+        let c = temp_core("rb");
+        c.data.lock().unwrap().assets.push(Asset { id: 1, name: "存款".into(), currency: "TWD".into(), value: 50.0, ..Default::default() });
+        c.set_password("", "secret1").unwrap();
+        let env = fs::read_to_string(&c.path).unwrap();
+        assert_eq!(c.import_backup(&env, None).unwrap_err(), "ENCRYPTED");
+        assert!(c.import_backup(&env, Some("wrong!")).is_err());
+        assert!(c.import_backup(&env, Some("secret1")).is_ok());
+        let _ = fs::remove_file(&c.path);
+    }
+
+    #[test]
+    fn daily_backup_keeps_only_the_newest_copies() {
+        let c = temp_core("bk");
+        let dir = std::env::temp_dir().join(format!("moneypi-bk-dir-{}", random_hex(4)));
+        fs::create_dir_all(&dir).unwrap();
+        for d in ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"] {
+            fs::write(dir.join(format!("moneypi-{d}.json")), "{}").unwrap();
+        }
+        fs::write(dir.join("notes.txt"), "keep me").unwrap();
+        assert!(c.set_backup(true, "relative\\path", 3).is_err());
+        assert!(c.set_backup(true, &dir.display().to_string(), 2).is_err()); // keep < 3
+        c.set_backup(true, &dir.display().to_string(), 3).unwrap();
+        let files = backup_files(&dir);
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&format!("moneypi-{}.json", today())) && !files.contains(&"moneypi-2026-01-01.json".to_string()));
+        assert!(dir.join("notes.txt").exists());
+        assert_eq!(c.auto_backup(false).unwrap(), None); // already done today
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_file(&c.path);
+    }
+
+    #[test]
+    fn dividends_use_the_units_held_before_the_ex_date() {
+        let txs = vec![
+            tx("2026-01-10", "buy", 100.0, 10.0, 0.0),
+            tx("2026-03-01", "buy", 50.0, 10.0, 0.0),
+            tx("2026-04-10", "sell", 30.0, 10.0, 0.0),
+        ];
+        let ev = vec![("2026-01-05".to_string(), 0.5), ("2026-03-01".to_string(), 0.5), ("2026-06-01".to_string(), 0.5)];
+        let got = dividend_candidates(&txs, &ev, &[]);
+        assert_eq!(got[0].1, 0.0); // before the first buy
+        assert_eq!(got[1].1, 100.0); // bought on the ex-date: not entitled
+        assert_eq!(got[2].1, 120.0);
+        let again = dividend_candidates(&txs, &ev, &["2026-01-05".to_string(), "2026-03-01".to_string()]);
+        assert_eq!(again.len(), 1);
     }
 
     #[test]
