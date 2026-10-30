@@ -1199,6 +1199,35 @@ async function runPlans(announce) {
   } catch (err) { if (announce) toast(String(err)); }
 }
 
+/* ---------- performance mode ---------- */
+// off = full effects, on = lite, auto = lite on low battery or when the system asks for reduced motion.
+let perfMode = store.get("perf", "auto"), lowBattery = false;
+const mqReduce = matchMedia("(prefers-reduced-motion: reduce)");
+const liteOn = () => perfMode === "on" || (perfMode === "auto" && (mqReduce.matches || lowBattery));
+function applyPerf() {
+  const lite = liteOn();
+  document.documentElement.classList.toggle("lite", lite);
+  [...$("perf-seg").children].forEach((b) => b.classList.toggle("on", b.dataset.p === perfMode));
+  $("perf-hint").textContent = perfMode === "on" ? "省電中：已關閉光暈、毛玻璃模糊與動畫，並降低背景檢查頻率。"
+    : perfMode === "off" ? "標準：完整特效。"
+    : lite ? "自動：目前偵測到低電量或系統要求減少動畫，已切換成省電。" : "自動：筆電沒插電且電量 30% 以下時會自動省電。";
+}
+$("perf-seg").onclick = (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  perfMode = b.dataset.p;
+  store.set("perf", perfMode);
+  applyPerf();
+};
+mqReduce.addEventListener?.("change", applyPerf);
+navigator.getBattery?.().then((b) => {
+  const upd = () => { lowBattery = !b.charging && b.level <= 0.3; applyPerf(); };
+  b.addEventListener("levelchange", upd);
+  b.addEventListener("chargingchange", upd);
+  upd();
+}).catch(() => {});
+applyPerf();
+
 /* ---------- password prompt / lock ---------- */
 const qdlg = $("qdlg"), qform = $("qform");
 // Resolves with the typed password, or null when cancelled.
@@ -1459,12 +1488,14 @@ $("refresh-btn").onclick = () => doRefresh(true);
 function scheduleRefresh() {
   clearInterval(refreshTimer);
   // Only the desktop app drives quote refresh; LAN browsers just pick up the results via polling.
-  if (inTauri && data.refresh_min > 0) refreshTimer = setInterval(() => doRefresh(false), data.refresh_min * 60000);
+  if (inTauri && data.refresh_min > 0) refreshTimer = setInterval(() => { if (!(liteOn() && document.hidden)) doRefresh(false); }, data.refresh_min * 60000);
 }
 
 // Pick up changes made on another device (and quote refreshes) without clobbering an open dialog.
+let pollTick = 0;
 setInterval(async () => {
   if (document.hidden || document.querySelector("dialog[open]") || refreshing) return;
+  if (liteOn() && ++pollTick % 4) return; // lite: every 2 minutes instead of 30 seconds
   try {
     const d = await invoke("get_data");
     if (JSON.stringify(d) !== JSON.stringify(data)) { data = d; render(); }

@@ -9,10 +9,10 @@
 html,body{height:100%}
 body{margin:0;color:var(--fg);background:#fff;font:14px/1.5 "Segoe UI Variable","Microsoft JhengHei",system-ui,sans-serif;overflow:hidden}
 .orbs{position:fixed;inset:0;z-index:-1;overflow:hidden;background:#fff}
-.orbs i{position:absolute;border-radius:50%;filter:blur(80px);opacity:.34;animation:drift 26s ease-in-out infinite alternate}
-.orbs i:nth-child(1){width:42vmax;height:42vmax;background:#9ec2ff;left:-12vmax;top:-14vmax}
-.orbs i:nth-child(2){width:34vmax;height:34vmax;background:#d9b8ff;right:-10vmax;top:26vh;animation-delay:-8s}
-.orbs i:nth-child(3){width:30vmax;height:30vmax;background:#a8ecdc;left:36vw;bottom:-16vmax;animation-delay:-15s}
+.orbs i{position:absolute;border-radius:50%;opacity:.5;animation:drift 20s ease-out 1 both} /* one gentle drift on start, then still: endless motion under backdrop blur re-blurs every frame and kept a CPU core busy */
+.orbs i:nth-child(1){width:42vmax;height:42vmax;background:radial-gradient(circle,#9ec2ff 0%,rgba(158,194,255,0) 68%);left:-12vmax;top:-14vmax}
+.orbs i:nth-child(2){width:34vmax;height:34vmax;background:radial-gradient(circle,#d9b8ff 0%,rgba(217,184,255,0) 68%);right:-10vmax;top:26vh;animation-delay:-8s}
+.orbs i:nth-child(3){width:30vmax;height:30vmax;background:radial-gradient(circle,#a8ecdc 0%,rgba(168,236,220,0) 68%);left:36vw;bottom:-16vmax;animation-delay:-15s}
 @keyframes drift{to{transform:translate(5vmax,-3vmax) scale(1.12)}}
 @media (prefers-reduced-motion:reduce){.orbs i{animation:none}}
 
@@ -372,3 +372,16 @@ img.logo{background:none;border-radius:0;box-shadow:none;object-fit:contain;filt
 .rp-goal .top{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
 #bk-dir{margin-top:4px}
 #sdlg .row + .hint{margin-top:2px}
+
+/* ---------- lite (power saving) mode ---------- */
+html.lite *,html.lite *::before,html.lite *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important;
+  -webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+html.lite .orbs{display:none}
+html.lite body{background:#f4f6fd}
+html.lite .glass,html.lite dialog,html.lite .dd-menu{background:rgba(255,255,255,.96)!important;box-shadow:0 2px 10px rgba(40,55,120,.1)!important}
+html.lite dialog::backdrop{background:rgba(40,50,90,.4);-webkit-backdrop-filter:none;backdrop-filter:none}
+html.lite .view>.glass,html.lite .cards>.card{animation:none!important}
+html.lite #toast{transform:translateX(-50%)!important}
+/* progress feedback stays animated: it is cheap and tells the user something is happening */
+html.lite .pgbar i.ind{animation:indet 1.2s ease-in-out infinite!important}
+html.lite #refresh-btn.spin svg{animation:spin .9s linear infinite!important}

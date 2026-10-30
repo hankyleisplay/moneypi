@@ -283,6 +283,11 @@
       <p><b>自動備份：</b>「設定 → 自動備份」開啟後，每天複製一份資料檔到你指定的資料夾（例如 OneDrive），保留最近幾份。設了密碼的話，備份也是加密的，還原時需要輸入當時的密碼。</p>
     </details>
 
+    <details class="help"><summary>電腦很慢或想省電？</summary>
+      <p>「設定 → 效能模式」選<b>省電</b>：關掉背景光暈、毛玻璃模糊和所有動畫（果凍效果、進場動畫），並降低背景檢查頻率，CPU／GPU 與耗電會明顯下降，功能完全一樣。</p>
+      <p><b>自動</b>：筆電沒插電且電量 30% 以下，或系統關閉了動畫效果時，自動切換成省電；<b>標準</b>則維持完整特效。這個設定每台裝置各自記住（電腦和手機可以不同）。</p>
+    </details>
+
     <details class="help"><summary>配息會自動記錄嗎？</summary>
       <p>有設定行情代號的持倉，MoneyPi 會依除息日前你持有的股數，自動記下配息（稅前每股配息 × 股數）。刪除自動記下的配息後不會再補回來。想關閉可在編輯項目時取消「自動記錄配息」，也可以選配息要入帳到哪個存款。</p>
     </details>
@@ -363,6 +368,12 @@
 <dialog id="sdlg" class="glass">
   <form method="dialog" id="sform">
     <h3>設定</h3>
+
+    <h4>效能模式</h4>
+    <div class="seg" id="perf-seg">
+      <button type="button" data-p="off">標準</button><button type="button" data-p="auto">自動</button><button type="button" data-p="on">省電</button>
+    </div>
+    <p class="hint" id="perf-hint"></p>
 
     <h4>股價與匯率自動更新</h4>
     <div class="seg" id="refresh-seg">
