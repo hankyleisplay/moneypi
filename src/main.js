@@ -1578,6 +1578,16 @@ $("import-file").onchange = async (e) => {
   if (!f) return;
   try {
     const text = await f.text();
+    // JSON backup from the Asset Tracker app: holdings with their transactions + daily totals
+    if (/^\uFEFF?\s*\{/.test(text)) {
+      const r = await invoke("import_tracker", { text });
+      data = r.data;
+      render();
+      const bits = [r.added.length ? `${r.added.length} 檔持倉` : "", r.days ? `${r.days} 天歷史淨值` : ""].filter(Boolean);
+      const notes = [r.duplicates.length ? `${r.duplicates.length} 檔已存在而略過` : "", r.skipped_tx ? `${r.skipped_tx} 筆無法辨識的交易已略過` : ""].filter(Boolean);
+      toast(bits.length ? `已匯入 ${bits.join("、")}${notes.length ? `（${notes.join("，")}）` : ""}` : `沒有新資料可匯入${notes.length ? `（${notes.join("，")}）` : ""}`);
+      return;
+    }
     // a daily net-worth history (日期 + 總資產 columns) goes to the trend chart instead of the asset list
     const head = text.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0];
     if (/日期|date/i.test(head) && /總資產|淨值/.test(head)) {

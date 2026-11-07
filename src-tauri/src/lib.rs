@@ -1624,6 +1624,33 @@ impl Core {
         out
     }
 
+    /// Import holdings (with their transactions) and daily totals from an "Asset Tracker" JSON backup.
+    /// Holdings that already exist (same ticker or name) are left alone; existing snapshot days are kept.
+    fn import_tracker(&self, text: &str) -> Result<Value, String> {
+        let (assets, days, skipped_tx) = parse_tracker(text)?;
+        let mut d = self.data.lock().unwrap();
+        let (mut added, mut dup) = (vec![], vec![]);
+        for mut a in assets {
+            let exists = d.assets.iter().any(|o| o.name == a.name || (!a.symbol.is_empty() && o.symbol == a.symbol && o.market == a.market));
+            if exists {
+                dup.push(a.name);
+                continue;
+            }
+            validate_asset(&a, &d).map_err(|e| format!("{}：{}", a.name, e))?;
+            a.updated = today();
+            recompute(&mut a);
+            d.next_id += 1;
+            a.id = d.next_id;
+            added.push(a.name.clone());
+            d.assets.push(a);
+        }
+        let (days_added, days_skipped) = add_missing_snapshots(&mut d.snapshots, days, &today());
+        if !added.is_empty() || days_added > 0 {
+            self.commit(&mut d)?;
+        }
+        Ok(json!({ "data": view(&d), "added": added, "duplicates": dup, "days": days_added, "days_skipped": days_skipped, "skipped_tx": skipped_tx }))
+    }
+
     /// Import a daily net-worth history (see `merge_history`). Does not touch today's snapshot.
     fn import_history(&self, text: &str) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
@@ -2068,6 +2095,22 @@ fn norm_date(s: &str) -> Option<String> {
     Some(format!("{y:04}-{m:02}-{d:02}"))
 }
 
+/// Add snapshots for dates that have none yet (existing ones are kept, future dates skipped). Returns (added, skipped).
+fn add_missing_snapshots(snaps: &mut Vec<Snapshot>, new: Vec<Snapshot>, today: &str) -> (usize, usize) {
+    let mut known: std::collections::HashSet<String> = snaps.iter().map(|s| s.date.clone()).collect();
+    let (mut added, mut skipped) = (0, 0);
+    for s in new {
+        if s.date.as_str() > today || !known.insert(s.date.clone()) {
+            skipped += 1;
+        } else {
+            snaps.push(s);
+            added += 1;
+        }
+    }
+    snaps.sort_by(|a, b| a.date.cmp(&b.date));
+    (added, skipped)
+}
+
 /// Merge a daily net-worth history CSV (columns found by header: 日期, 總資產, optional 總負債) into the snapshots.
 /// Dates that already have a snapshot are kept untouched; future dates are skipped. Returns (added, skipped).
 fn merge_history(snaps: &mut Vec<Snapshot>, text: &str, today: &str) -> Result<(usize, usize), String> {
@@ -2080,8 +2123,7 @@ fn merge_history(snaps: &mut Vec<Snapshot>, text: &str, today: &str) -> Result<(
     let (Some(di), Some(ai)) = (di, ai) else {
         return Err("找不到「日期」與「總資產」欄位".into());
     };
-    let mut known: std::collections::HashSet<String> = snaps.iter().map(|s| s.date.clone()).collect();
-    let (mut added, mut skipped) = (0, 0);
+    let mut new = vec![];
     for (i, r) in rows.iter().enumerate().skip(1) {
         if r.iter().all(|c| c.trim().is_empty()) {
             continue;
@@ -2102,18 +2144,90 @@ fn merge_history(snaps: &mut Vec<Snapshot>, text: &str, today: &str) -> Result<(
             Some(l) => num(l, true)?,
             None => 0.0,
         };
-        if date.as_str() > today || !known.insert(date.clone()) {
-            skipped += 1;
-            continue;
-        }
-        snaps.push(Snapshot { date, assets, liabilities });
-        added += 1;
+        new.push(Snapshot { date, assets, liabilities });
     }
-    if added + skipped == 0 {
+    if new.is_empty() {
         return Err("檔案中沒有可匯入的資料".into());
     }
-    snaps.sort_by(|a, b| a.date.cmp(&b.date));
-    Ok((added, skipped))
+    Ok(add_missing_snapshots(snaps, new, today))
+}
+
+/// Read a JSON backup from the "Asset Tracker" app (`holdings` with buy/sell transactions + daily `snapshots`).
+/// Returns the holdings as MoneyPi assets, the daily totals, and how many transactions had to be skipped.
+fn parse_tracker(text: &str) -> Result<(Vec<Asset>, Vec<Snapshot>, usize), String> {
+    let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| format!("不是有效的 JSON：{e}"))?;
+    let (Some(holdings), Some(snaps)) = (v["holdings"].as_array(), v["snapshots"].as_array()) else {
+        return Err("這不是支援的備份檔（找不到 holdings 與 snapshots）".into());
+    };
+    // latest close of a symbol, taken from the newest snapshot that lists it
+    let last_close = |sym: &str| -> Option<f64> {
+        snaps.iter().rev().find_map(|s| s["positions"].as_array()?.iter().find(|p| p["symbol"].as_str() == Some(sym))?["close"].as_f64())
+    };
+    let (mut assets, mut skipped_tx) = (vec![], 0);
+    for h in holdings {
+        let name = h["name"].as_str().unwrap_or("").trim().to_string();
+        let sym = h["symbol"].as_str().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let manual = h["manualNav"].as_bool().unwrap_or(false);
+        let mut txs = vec![];
+        for t in h["transactions"].as_array().into_iter().flatten() {
+            let kind = match t["kind"].as_str() {
+                Some("buy") => "buy",
+                Some("sell") => "sell",
+                _ => {
+                    skipped_tx += 1;
+                    continue;
+                }
+            };
+            let date = t["date"].as_str().unwrap_or("");
+            let (units, price, fee) = (t["shares"].as_f64().unwrap_or(0.0), t["price"].as_f64().unwrap_or(0.0), t["fee"].as_f64().unwrap_or(0.0));
+            if !valid_date(date) || !(units > 0.0) || !(price >= 0.0) || !(fee >= 0.0) {
+                skipped_tx += 1;
+                continue;
+            }
+            txs.push(Tx { date: date.into(), kind: kind.into(), units, price, fee, ..Default::default() });
+        }
+        if txs.is_empty() {
+            continue;
+        }
+        // "2542:TPE" / "8042:TPEX" -> Taiwan listed ("tw"); funds priced by hand keep no ticker
+        let (symbol, market) = if manual {
+            (String::new(), "")
+        } else if let Some((code, ex)) = sym.split_once(':') {
+            (code.to_string(), if matches!(ex, "TPE" | "TPEX") { "tw" } else { "other" })
+        } else {
+            (sym.to_string(), "other")
+        };
+        let nav = h["navHistory"].as_object().and_then(|m| m.iter().max_by(|a, b| a.0.cmp(b.0))).map(|(d, v)| (d.clone(), v.as_f64().unwrap_or(0.0)));
+        let last_tx = txs.last().map(|t| t.price).unwrap_or(0.0);
+        let (price, price_updated) = match (&nav, manual) {
+            (Some((d, v)), true) if *v > 0.0 => (*v, d.clone()),
+            _ => (last_close(sym).unwrap_or(last_tx), String::new()),
+        };
+        let etf = market == "tw" && symbol.starts_with("00");
+        let account = h["account"].as_str().unwrap_or("").trim();
+        assets.push(Asset {
+            name,
+            category: if manual || etf { "基金/ETF" } else { "股票" }.into(),
+            currency: h["currency"].as_str().filter(|c| !c.trim().is_empty()).unwrap_or("TWD").trim().to_uppercase(),
+            note: if account.is_empty() { String::new() } else { format!("帳戶：{account}") },
+            holding: true,
+            symbol,
+            market: market.into(),
+            price,
+            price_updated,
+            txs,
+            auto_div: !market.is_empty(),
+            ..Default::default()
+        });
+    }
+    let days = snaps
+        .iter()
+        .filter_map(|s| Some(Snapshot { date: norm_date(s["date"].as_str()?)?, assets: s["total"].as_f64().filter(|t| t.is_finite() && *t >= 0.0)?, liabilities: 0.0 }))
+        .collect();
+    Ok((assets, days, skipped_tx))
 }
 
 fn parse_csv(text: &str) -> Vec<Vec<String>> {
@@ -2176,6 +2290,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "delete_goal" => core.delete_goal(arg(&args, "id")?),
         "refresh_quotes" => core.refresh_quotes(),
         "export_csv" => Ok(Value::String(core.export_csv())),
+        "import_tracker" => core.import_tracker(&arg::<String>(&args, "text")?),
         "import_history" => core.import_history(&arg::<String>(&args, "text")?),
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
         "add_flow" => core.add_flow(arg(&args, "flow")?),
@@ -2429,6 +2544,23 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tracker_backup_converts_holdings_and_days() {
+        let json = r#"{"holdings":[
+          {"name":"興富發建設","symbol":"2542:TPE","currency":"TWD","account":"國泰","manualNav":false,
+           "transactions":[{"kind":"buy","date":"2026-08-14","shares":1.0,"price":46.05,"fee":1.0},{"kind":"bogus","date":"2026-08-15","shares":1.0,"price":1.0,"fee":0.0}]},
+          {"name":"某基金","symbol":"某基金","currency":"TWD","account":"投信","manualNav":true,"navHistory":{"2026-08-01":700.0,"2026-11-06":576.27},
+           "transactions":[{"kind":"buy","date":"2026-03-03","shares":10.0,"price":600.0,"fee":0.0}]},
+          {"name":"沒有交易","symbol":"1:TPE","transactions":[]}],
+          "snapshots":[{"date":"2026-08-17","total":54727.027,"positions":[]},{"date":"bad","total":1.0}]}"#;
+        let (assets, days, skipped) = parse_tracker(json).unwrap();
+        assert_eq!((assets.len(), days.len(), skipped), (2, 1, 1));
+        let (a, f) = (&assets[0], &assets[1]);
+        assert_eq!((a.symbol.as_str(), a.market.as_str(), a.category.as_str(), a.price), ("2542", "tw", "股票", 46.05));
+        assert_eq!((f.symbol.as_str(), f.market.as_str(), f.category.as_str(), f.price, f.price_updated.as_str()), ("", "", "基金/ETF", 576.27, "2026-11-06"));
+        assert!(parse_tracker("{\"a\":1}").is_err());
+    }
 
     #[test]
     fn history_import_adds_missing_days_only() {
