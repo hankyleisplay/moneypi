@@ -57,15 +57,25 @@ jobs:
           notes="release-notes/v$V.md"
           [ -s "$notes" ] || { echo "::error::$notes is missing or empty - write the release notes first"; exit 1; }
 
-          # notes + the standard install section, so no release ships without it
-          {
-            cat "$notes"
-            printf '\n\n### 安裝與更新\n'
-            printf -- '- 已安裝 v0.13.0 以上的使用者會在啟動時收到更新提示，一鍵更新\n'
-            printf -- '- v0.12.0 以前的使用者請先手動安裝一次（簽章金鑰已更換）\n'
-            printf -- '- 手動安裝：`MoneyPi_%s_x64-setup.exe`（建議）或 `MoneyPi_%s_x64_en-US.msi`\n' "$V" "$V"
-            printf -- '- 安裝檔未經程式碼簽章，Windows SmartScreen 可能會提示，請選「更多資訊 → 仍要執行」\n'
-          } > "$RUNNER_TEMP/release-body.md"
+          # release body = notes + the standard install section (so no release ships without it);
+          # the updater prompt (latest.json "notes") gets just the notes
+          node - "$V" "$notes" "$RUNNER_TEMP" <<'JS'
+          const fs = require("fs");
+          const [v, file, tmp] = process.argv.slice(2);
+          const notes = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n").trim();
+          const body = [
+            notes,
+            "",
+            "### 安裝與更新",
+            "- 已安裝 v0.13.0 以上的使用者會在啟動時收到更新提示，一鍵更新",
+            "- v0.12.0 以前的使用者請先手動安裝一次（簽章金鑰已更換）",
+            "- 手動安裝：`MoneyPi_" + v + "_x64-setup.exe`（建議）或 `MoneyPi_" + v + "_x64_en-US.msi`",
+            "- 安裝檔未經程式碼簽章，Windows SmartScreen 可能會提示，請選「更多資訊 → 仍要執行」",
+            "",
+          ].join("\n");
+          fs.writeFileSync(tmp + "/release-body.md", body);
+          fs.writeFileSync(tmp + "/update-notes.md", notes + "\n");
+          JS
 
       - uses: actions/setup-node@v4
         with:
@@ -95,6 +105,19 @@ jobs:
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
 
+      - name: Put the update notes into latest.json
+        run: |
+          set -euo pipefail
+          gh release download "v$VERSION" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
+          node - "$RUNNER_TEMP" <<'JS'
+          const fs = require("fs");
+          const t = process.argv[2];
+          const j = JSON.parse(fs.readFileSync(t + "/latest.json", "utf8"));
+          j.notes = fs.readFileSync(t + "/update-notes.md", "utf8").trim();
+          fs.writeFileSync(t + "/latest.json", JSON.stringify(j, null, 2) + "\n");
+          JS
+          gh release upload "v$VERSION" "$RUNNER_TEMP/latest.json" --clobber
+
       - name: Check that nothing is missing
         run: |
           set -euo pipefail
@@ -114,6 +137,7 @@ jobs:
           const [v, file] = process.argv.slice(2);
           const j = JSON.parse(require("fs").readFileSync(file, "utf8"));
           const p = j.platforms && j.platforms["windows-x86_64"];
+          if (!j.notes || !j.notes.trim()) { console.log("::error::latest.json has no update notes"); process.exit(1); }
           if (j.version !== v) { console.log(`::error::latest.json version ${j.version} != ${v}`); process.exit(1); }
           if (!p || !p.signature || !p.url.endsWith(`MoneyPi_${v}_x64-setup.exe`)) { console.log("::error::latest.json has no valid windows-x86_64 entry"); process.exit(1); }
           console.log("latest.json ok");
