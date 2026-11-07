@@ -1624,6 +1624,16 @@ impl Core {
         out
     }
 
+    /// Import a daily net-worth history (see `merge_history`). Does not touch today's snapshot.
+    fn import_history(&self, text: &str) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        let (added, skipped) = merge_history(&mut d.snapshots, text, &today())?;
+        if added > 0 {
+            self.persist(&d)?;
+        }
+        Ok(json!({ "data": view(&d), "added": added, "skipped": skipped }))
+    }
+
     fn import_csv(&self, text: &str) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
         let mut added = vec![];
@@ -2043,6 +2053,69 @@ fn csv_field(s: &str) -> String {
 }
 
 /// Minimal RFC 4180 parser: quoted fields, doubled quotes, CRLF or LF.
+/// "2026-8-5" / "2026/08/05" -> "2026-08-05" (None when it is not a real calendar date).
+fn norm_date(s: &str) -> Option<String> {
+    let p: Vec<&str> = s.trim().split(|c| c == '-' || c == '/').collect();
+    if p.len() != 3 {
+        return None;
+    }
+    let (y, m, d) = (p[0].trim().parse::<u32>().ok()?, p[1].trim().parse::<u32>().ok()?, p[2].trim().parse::<u32>().ok()?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1900..=2200).contains(&y) || !(1..=12).contains(&m) || d < 1 || d > dim[m as usize - 1] {
+        return None;
+    }
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+/// Merge a daily net-worth history CSV (columns found by header: 日期, 總資產, optional 總負債) into the snapshots.
+/// Dates that already have a snapshot are kept untouched; future dates are skipped. Returns (added, skipped).
+fn merge_history(snaps: &mut Vec<Snapshot>, text: &str, today: &str) -> Result<(usize, usize), String> {
+    let rows = parse_csv(text);
+    let head = rows.first().ok_or("檔案是空的")?;
+    let col = |names: &[&str]| head.iter().position(|h| names.contains(&h.trim().to_lowercase().as_str()));
+    let di = col(&["日期", "date"]);
+    let ai = col(&["總資產", "資產", "淨值", "total", "assets"]);
+    let li = col(&["總負債", "負債", "liabilities"]);
+    let (Some(di), Some(ai)) = (di, ai) else {
+        return Err("找不到「日期」與「總資產」欄位".into());
+    };
+    let mut known: std::collections::HashSet<String> = snaps.iter().map(|s| s.date.clone()).collect();
+    let (mut added, mut skipped) = (0, 0);
+    for (i, r) in rows.iter().enumerate().skip(1) {
+        if r.iter().all(|c| c.trim().is_empty()) {
+            continue;
+        }
+        let num = |n: usize, allow_empty: bool| -> Result<f64, String> {
+            let t = r.get(n).map(|c| c.trim().replace(',', "")).unwrap_or_default();
+            if t.is_empty() && allow_empty {
+                return Ok(0.0);
+            }
+            match t.parse::<f64>() {
+                Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
+                _ => Err(format!("第 {} 行：數字格式錯誤", i + 1)),
+            }
+        };
+        let date = norm_date(r.get(di).map(String::as_str).unwrap_or("")).ok_or(format!("第 {} 行：日期格式錯誤（需要 2026-08-17）", i + 1))?;
+        let assets = num(ai, false)?;
+        let liabilities = match li {
+            Some(l) => num(l, true)?,
+            None => 0.0,
+        };
+        if date.as_str() > today || !known.insert(date.clone()) {
+            skipped += 1;
+            continue;
+        }
+        snaps.push(Snapshot { date, assets, liabilities });
+        added += 1;
+    }
+    if added + skipped == 0 {
+        return Err("檔案中沒有可匯入的資料".into());
+    }
+    snaps.sort_by(|a, b| a.date.cmp(&b.date));
+    Ok((added, skipped))
+}
+
 fn parse_csv(text: &str) -> Vec<Vec<String>> {
     let (mut rows, mut row, mut field) = (vec![], vec![], String::new());
     let (mut quoted, mut chars) = (false, text.trim_start_matches('\u{feff}').chars().peekable());
@@ -2103,6 +2176,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "delete_goal" => core.delete_goal(arg(&args, "id")?),
         "refresh_quotes" => core.refresh_quotes(),
         "export_csv" => Ok(Value::String(core.export_csv())),
+        "import_history" => core.import_history(&arg::<String>(&args, "text")?),
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
         "add_flow" => core.add_flow(arg(&args, "flow")?),
         "delete_flow" => core.delete_flow(arg(&args, "id")?),
@@ -2355,6 +2429,20 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn history_import_adds_missing_days_only() {
+        let mut snaps = vec![Snapshot { date: "2026-08-18".into(), assets: 1.0, liabilities: 0.0 }];
+        let csv = "\u{feff}日期,總資產,投資市值,幣別\n2026-08-17,\"54,727.03\",1,TWD\n2026-08-18,56346.49,1,TWD\n2026/8/19,55126.24,1,TWD\n2030-01-01,9,1,TWD\n\n";
+        let (added, skipped) = merge_history(&mut snaps, csv, "2026-11-07").unwrap();
+        assert_eq!((added, skipped), (2, 2)); // 08-18 exists, 2030 is in the future
+        assert_eq!(snaps.iter().map(|s| s.date.as_str()).collect::<Vec<_>>(), ["2026-08-17", "2026-08-18", "2026-08-19"]);
+        assert_eq!(snaps[0].assets, 54727.03);
+        assert_eq!(snaps[1].assets, 1.0, "existing snapshot must not be overwritten");
+        assert!(merge_history(&mut snaps, "名稱,金額\nx,1\n", "2026-11-07").is_err());
+        assert!(merge_history(&mut snaps, "日期,總資產\n2026-02-30,5\n", "2026-11-07").is_err());
+        assert!(merge_history(&mut snaps, "日期,總資產\n2026-08-20,abc\n", "2026-11-07").is_err());
+    }
     use super::*;
 
     fn tx(date: &str, kind: &str, units: f64, price: f64, fee: f64) -> Tx {

@@ -1577,8 +1577,18 @@ $("import-file").onchange = async (e) => {
   e.target.value = "";
   if (!f) return;
   try {
+    const text = await f.text();
+    // a daily net-worth history (日期 + 總資產 columns) goes to the trend chart instead of the asset list
+    const head = text.replace(/^\uFEFF/, "").split(/\r?\n/, 1)[0];
+    if (/日期|date/i.test(head) && /總資產|淨值/.test(head)) {
+      const r = await invoke("import_history", { text });
+      data = r.data;
+      render();
+      toast(r.added ? `已匯入 ${r.added} 天歷史淨值${r.skipped ? `（略過 ${r.skipped} 天已存在或未來日期）` : ""}` : `沒有新資料可匯入（${r.skipped} 天已存在或為未來日期）`);
+      return;
+    }
     const before = data.assets.length;
-    data = await invoke("import_csv", { text: await f.text() });
+    data = await invoke("import_csv", { text });
     render();
     toast(`已匯入 ${data.assets.length - before} 筆`);
   } catch (err) {
