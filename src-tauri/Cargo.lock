@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "moneypi"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
