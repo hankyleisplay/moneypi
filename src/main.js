@@ -559,7 +559,9 @@ async function loadForecast(a) {
   try {
     if (!s || Date.now() - s.at > 3600e3) {
       s = { at: Date.now(), ...(await invoke("price_history", { id: a.id, range: ui.fcRange })) };
+      fcCache.delete(key);
       fcCache.set(key, s);
+      while (fcCache.size > 6) fcCache.delete(fcCache.keys().next().value); // keep only the 6 most recent histories
     }
   } catch (err) {
     if ($("fc-sum") && ui.sel === a.id) { $("fc-sum").innerHTML = `<p class="muted">無法取得歷史價格：${esc(String(err))}</p>`; $("fc").style.display = "none"; }
@@ -797,8 +799,9 @@ $("view-detail").onclick = async (e) => {
 /* ---------- charts ---------- */
 function setupCanvas(c) {
   const r = { width: c.clientWidth, height: c.clientHeight }, dpr = window.devicePixelRatio || 1;
-  c.width = Math.round(r.width * dpr);
-  c.height = Math.round(r.height * dpr);
+  const w = Math.round(r.width * dpr), h = Math.round(r.height * dpr);
+  if (c.width !== w) c.width = w; // assigning width/height reallocates + clears the bitmap, so only when it changed
+  if (c.height !== h) c.height = h;
   const g = c.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, r.width, r.height);
@@ -892,8 +895,9 @@ $("trend").addEventListener("mousemove", (e) => {
   const mx = e.clientX - $("trend").getBoundingClientRect().left;
   let best = 0;
   trendPts.forEach((p, i) => { if (Math.abs(p.x - mx) < Math.abs(trendPts[best].x - mx)) best = i; });
-  if (best !== ui.hover) { ui.hover = best; drawTrend(); }
+  if (best !== ui.hover) { ui.hover = best; hoverRaf ||= requestAnimationFrame(() => { hoverRaf = 0; drawTrend(); }); }
 });
+let hoverRaf = 0;
 $("trend").addEventListener("mouseleave", () => { ui.hover = -1; drawTrend(); });
 
 function drawAlloc() {
@@ -1201,22 +1205,23 @@ async function runPlans(announce) {
 
 /* ---------- performance mode ---------- */
 // off = full effects, on = lite, auto = lite on low battery or when the system asks for reduced motion.
-let perfMode = store.get("perf", "auto"), lowBattery = false;
+let perfMode = store.get("perf", "auto"), lowBattery = false, slowDevice = store.get("perfSlow", "0") === "1";
 const mqReduce = matchMedia("(prefers-reduced-motion: reduce)");
-const liteOn = () => perfMode === "on" || (perfMode === "auto" && (mqReduce.matches || lowBattery));
+const liteOn = () => perfMode === "on" || (perfMode === "auto" && (mqReduce.matches || lowBattery || slowDevice));
 function applyPerf() {
   const lite = liteOn();
   document.documentElement.classList.toggle("lite", lite);
   [...$("perf-seg").children].forEach((b) => b.classList.toggle("on", b.dataset.p === perfMode));
-  $("perf-hint").textContent = perfMode === "on" ? "省電中：已關閉光暈、毛玻璃模糊與動畫，並降低背景檢查頻率。"
-    : perfMode === "off" ? "標準：完整特效。"
-    : lite ? "自動：目前偵測到低電量或系統要求減少動畫，已切換成省電。" : "自動：筆電沒插電且電量 30% 以下時會自動省電。";
+  $("perf-hint").textContent = perfMode === "on" ? "省電中：保留果凍動畫，但關閉毛玻璃模糊與背景光暈，並降低背景檢查頻率。"
+    : perfMode === "off" ? "標準：完整液態玻璃特效（會自動回收記憶體）。"
+    : lite ? "自動：" + (slowDevice ? "偵測到畫面偏卡" : "偵測到低電量或系統要求減少動畫") + "，已切換成省電（仍有果凍效果）。" : "自動：低電量或偵測到畫面偏卡時會自動省電。";
 }
 $("perf-seg").onclick = (e) => {
   const b = e.target.closest("button");
   if (!b) return;
   perfMode = b.dataset.p;
   store.set("perf", perfMode);
+  slowDevice = false; probes = 0; slowHits = 0; store.set("perfSlow", "0"); // picking a mode re-arms the auto detector
   applyPerf();
 };
 mqReduce.addEventListener?.("change", applyPerf);
@@ -1227,6 +1232,44 @@ navigator.getBattery?.().then((b) => {
   upd();
 }).catch(() => {});
 applyPerf();
+
+// Auto mode: if frames are slow while the jelly plays, quietly fall back to lite (remembered across launches).
+let probes = 0, slowHits = 0, probing = false;
+const bootAt = performance.now();
+document.addEventListener("animationstart", () => {
+  if (perfMode !== "auto" || liteOn() || probing || document.hidden || probes >= 6 || performance.now() - bootAt < 4000) return;
+  probing = true; probes++;
+  const gaps = []; let last = performance.now();
+  const step = (t) => {
+    gaps.push(t - last); last = t;
+    if (gaps.length < 30) return requestAnimationFrame(step);
+    probing = false;
+    const avg = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+    if (avg > 34 && ++slowHits >= 2) {
+      slowDevice = true; store.set("perfSlow", "1"); applyPerf();
+      toast("偵測到畫面較卡，已自動切換成省電模式（保留果凍效果）");
+    }
+  };
+  requestAnimationFrame(step);
+}, true);
+
+/* ---------- resource recycling ---------- */
+// Frees what is only worth keeping while the window is in use: cached price histories, chart bitmaps of views
+// that are not showing, and the forecast observer. Runs when the window is hidden and after 3 idle minutes.
+function recycle() {
+  fcCache.clear();
+  if (ui.sel == null || !$("fc")) { fcState = null; fcRO?.disconnect(); }
+  document.querySelectorAll("canvas").forEach((c) => { if (!c.offsetParent) { c.width = 0; c.height = 0; } });
+}
+let idleTimer = 0;
+const armIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(recycle, 180000); };
+["pointerdown", "keydown", "wheel"].forEach((ev) => addEventListener(ev, armIdle, { passive: true }));
+armIdle();
+document.addEventListener("visibilitychange", () => {
+  document.documentElement.classList.toggle("rest", document.hidden);
+  if (document.hidden) recycle();
+  else if (!$("view-overview").hidden) drawCharts();
+});
 
 /* ---------- password prompt / lock ---------- */
 const qdlg = $("qdlg"), qform = $("qform");
