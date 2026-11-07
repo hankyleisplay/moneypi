@@ -561,6 +561,8 @@ struct Core {
     /// Held while recurring plans are being booked so two clients cannot book the same period twice.
     plan_lock: Mutex<()>,
     enc: Mutex<EncState>,
+    /// Bumped on every write (and lock/unlock) so other windows/phones can notice changes without polling the data.
+    rev: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default, Clone)]
@@ -846,6 +848,22 @@ impl Core {
         self.persist(d)
     }
 
+    fn bump(&self) {
+        self.rev.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Long poll: returns as soon as the revision differs from `since`, or after ~20 s with the unchanged revision.
+    fn wait_rev(&self, since: i64) -> Value {
+        let end = Instant::now() + Duration::from_secs(20);
+        loop {
+            let r = self.rev.load(std::sync::atomic::Ordering::SeqCst) as i64;
+            if r != since || Instant::now() >= end {
+                return json!({ "rev": r });
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+    }
+
     fn persist(&self, d: &Data) -> Result<(), String> {
         let json = serde_json::to_string_pretty(d).map_err(|e| e.to_string())?;
         let out = {
@@ -860,7 +878,9 @@ impl Core {
         };
         let tmp = self.path.with_extension("json.tmp");
         fs::write(&tmp, out).map_err(|e| e.to_string())?;
-        fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
+        fs::rename(&tmp, &self.path).map_err(|e| e.to_string())?;
+        self.bump();
+        Ok(())
     }
 
     fn is_locked(&self) -> bool {
@@ -890,6 +910,7 @@ impl Core {
         let (enabled, port) = (data.sync_enabled, data.sync_port);
         *self.data.lock().unwrap() = data;
         *self.enc.lock().unwrap() = EncState { encrypted: true, key: Some(key), salt };
+        self.bump();
         if enabled {
             let _ = self.start_server("0.0.0.0", port);
         }
@@ -909,6 +930,7 @@ impl Core {
         self.stop_server();
         self.enc.lock().unwrap().key = None;
         *self.data.lock().unwrap() = Data::default();
+        self.bump();
         Ok(self.lock_status())
     }
 
@@ -2071,6 +2093,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "backup_now" if !remote => core.auto_backup(true).map(|n| json!({ "name": n, "info": core.backup_info() })),
         "run_dividends" => core.run_dividends(),
         "get_data" => Ok(view(&core.data.lock().unwrap())),
+        "wait_rev" => Ok(core.wait_rev(args["since"].as_i64().unwrap_or(-1))),
         "save_asset" => core.save_asset(arg(&args, "asset")?),
         "delete_asset" => core.delete_asset(arg(&args, "id")?),
         "add_tx" => core.add_tx(arg(&args, "id")?, arg(&args, "tx")?),
@@ -2298,6 +2321,7 @@ pub fn run() {
                 progress: Mutex::new(Progress::default()),
                 plan_lock: Mutex::new(()),
                 enc: Mutex::new(enc),
+                rev: Default::default(),
             });
             if enabled {
                 if let Err(e) = core.start_server("0.0.0.0", port) {
@@ -2443,6 +2467,7 @@ mod tests {
             progress: Mutex::new(Progress::default()),
             plan_lock: Mutex::new(()),
             enc: Mutex::new(EncState::default()),
+            rev: Default::default(),
         }
     }
 

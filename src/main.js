@@ -1534,16 +1534,30 @@ function scheduleRefresh() {
   if (inTauri && data.refresh_min > 0) refreshTimer = setInterval(() => { if (!(liteOn() && document.hidden)) doRefresh(false); }, data.refresh_min * 60000);
 }
 
-// Pick up changes made on another device (and quote refreshes) without clobbering an open dialog.
-let pollTick = 0;
-setInterval(async () => {
-  if (document.hidden || document.querySelector("dialog[open]") || refreshing) return;
-  if (liteOn() && ++pollTick % 4) return; // lite: every 2 minutes instead of 30 seconds
+// Live sync: the host bumps a revision on every write and answers `wait_rev` the moment it changes (long poll, ~20 s
+// otherwise), so edits from the phone show up on the PC (and vice versa) within a fraction of a second with almost no traffic.
+let rev = -1, syncStale = false;
+async function syncNow() {
+  if (refreshing || document.querySelector("dialog[open]")) { syncStale = true; return; } // never clobber an open dialog
+  syncStale = false;
   try {
     const d = await invoke("get_data");
     if (JSON.stringify(d) !== JSON.stringify(data)) { data = d; render(); }
   } catch {}
-}, 30000);
+}
+document.addEventListener("close", () => { if (syncStale) syncNow(); }, true); // dialog closed: apply what arrived meanwhile
+(async function syncLoop() {
+  for (;;) {
+    if (document.hidden) { // nothing to show: sleep until the window is visible again, then catch up
+      await new Promise((r) => document.addEventListener("visibilitychange", () => !document.hidden && r(), { once: true }));
+      rev = -1;
+    }
+    try {
+      const r = await invoke("wait_rev", { since: rev });
+      if (r.rev !== rev) { const first = rev === -1; rev = r.rev; if (!first) await syncNow(); }
+    } catch { await new Promise((r) => setTimeout(r, 5000)); }
+  }
+})();
 
 /* ---------- CSV export / import ---------- */
 $("export-btn").onclick = async () => {
