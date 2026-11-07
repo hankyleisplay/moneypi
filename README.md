@@ -107,3 +107,13 @@ MoneyPi 是記帳輔助工具。畫面上的損益、預估與趨勢預測僅供
 ## 授權
 
 [GPL-3.0](LICENSE) © hankyleisplay
+
+### 發布新版（維護者）
+
+發布由 GitHub Actions（`.github/workflows/release.yml`）自動完成：在 Windows 上建置 `.exe` / `.msi`、用更新金鑰簽章、產生 `latest.json`，檢查檔案都齊全後才公開。
+
+1. 把 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`（以及 `Cargo.lock` 裡的 moneypi）改成新版號。
+2. 寫好 `release-notes/v<版號>.md`（更新內容；安裝與更新說明會由流程自動附上）。
+3. 合併到 `main`，然後推標籤 `git tag v<版號> && git push origin v<版號>`，或到 Actions → Release → Run workflow 輸入版號。
+
+第一次使用前，到 GitHub 儲存庫 Settings → Secrets and variables → Actions 新增 `TAURI_SIGNING_PRIVATE_KEY`（更新私鑰檔的完整內容；若金鑰有設密碼，另外加 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。

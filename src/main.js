@@ -817,7 +817,6 @@ function drawCharts() {
 }
 const ro = new ResizeObserver(drawCharts);
 ro.observe($("trend"));
-ro.observe($("months"));
 
 function drawTrend() {
   const { g, W, H } = setupCanvas($("trend"));
@@ -1688,36 +1687,27 @@ function monthlyChanges() {
   const last = new Map();
   data.snapshots.forEach((s) => last.set(s.date.slice(0, 7), s.assets - s.liabilities)); // chronological: last of month wins
   const keys = [...last.keys()].sort();
-  return keys.slice(1).map((k, i) => ({ m: k, v: last.get(k) - last.get(keys[i]) }));
+  return keys.slice(1).map((k, i) => ({ m: k, from: last.get(keys[i]), to: last.get(k), v: last.get(k) - last.get(keys[i]) }));
 }
-const compact = (v) => (Math.abs(v) >= 1e4 ? (v / 1e4).toFixed(Math.abs(v) >= 1e5 ? 0 : 1) + "萬" : fmt0.format(v));
 
+// One row per month, newest first: a bar growing right (green, grew) or left (red, shrank) from the middle line,
+// the signed amount and percentage, and the two month-end totals it was computed from.
 function drawMonths() {
-  const { g, W, H } = setupCanvas($("months"));
-  if (W < 80) return;
-  const rows = monthlyChanges().slice(-12);
-  $("months-note").textContent = rows.length ? "每月月底淨資產相較上月底的變化（本月為截至目前）。" : "";
-  g.font = "11px 'Segoe UI Variable', sans-serif";
-  if (!rows.length) {
-    g.fillStyle = css("--muted"); g.textAlign = "center";
-    g.fillText("累積滿兩個月的記錄後，會顯示每月變化", W / 2, H / 2);
-    return;
-  }
-  const top = 18, bot = H - 22;
-  const maxV = Math.max(...rows.map((r) => r.v), 0), minV = Math.min(...rows.map((r) => r.v), 0);
-  const span = maxV - minV || 1, y0 = top + (maxV / span) * (bot - top);
-  const bw = Math.min(46, (W / rows.length) * 0.58), step = W / rows.length;
-  g.strokeStyle = css("--line"); g.lineWidth = 1;
-  g.beginPath(); g.moveTo(0, y0); g.lineTo(W, y0); g.stroke();
-  rows.forEach((r, i) => {
-    const x = i * step + (step - bw) / 2, h = Math.max(2, (Math.abs(r.v) / span) * (bot - top));
-    const y = r.v >= 0 ? y0 - h : y0;
-    g.fillStyle = r.v >= 0 ? "#3ecf8e" : "#fb7185";
-    g.beginPath(); g.roundRect(x, y, bw, h, 6); g.fill();
-    g.fillStyle = css("--muted"); g.textAlign = "center";
-    g.fillText(r.m.slice(2).replace("-", "/"), x + bw / 2, H - 6);
-    if (!ui.hidden) { g.fillStyle = css("--fg"); g.fillText(compact(r.v), x + bw / 2, r.v >= 0 ? y - 4 : y + h + 12); }
-  });
+  const box = $("months-list"), cur = new Date().toLocaleDateString("sv-SE").slice(0, 7);
+  const rows = monthlyChanges().slice(-12).reverse();
+  $("months-note").textContent = rows.length ? "每個月底的淨資產，比上個月底多了（綠色，往右）或少了（紅色，往左）多少；本月為截至今天。" : "";
+  if (!rows.length) { box.innerHTML = `<p class="muted">累積滿兩個月的記錄後，會顯示每月變化</p>`; return; }
+  const maxAbs = Math.max(...rows.map((r) => Math.abs(r.v)), 1), m = mask();
+  const signed = (v) => (ui.hidden ? "••••" : (v >= 0 ? "＋" : "－") + fmt0.format(Math.abs(v)));
+  box.innerHTML = rows.map((r) => {
+    const up = r.v >= 0, w = Math.max(2, (Math.abs(r.v) / maxAbs) * 50), pct = r.from > 0 ? (r.v / r.from) * 100 : null;
+    return `<div class="mrow">
+      <div class="mm">${r.m.replace("-", " 年 ")} 月${r.m === cur ? "<small>截至今天</small>" : ""}</div>
+      <div class="mbar"><i class="${up ? "pos" : "neg"}" style="width:${w}%"></i></div>
+      <div class="mv ${up ? "pos" : "neg"}"><b class="${m}">${signed(r.v)}</b>${pct === null ? "" : `<small>${up ? "＋" : "－"}${Math.abs(pct).toFixed(1)}%</small>`}</div>
+      <div class="mfoot ${m}">月底淨資產　${money(r.from)}　→　${money(r.to)}</div>
+    </div>`;
+  }).join("");
 }
 
 /* ---------- bookkeeping (income / expense) ---------- */

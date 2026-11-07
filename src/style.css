@@ -227,6 +227,20 @@ button.link:hover,button.link:active{transform:none}
 
 /* ---------- v0.4: portfolio / months / bookkeeping ---------- */
 canvas.short{height:200px}
+.mrows{display:grid;gap:12px;margin-top:6px}
+.mrow{display:grid;grid-template-columns:116px minmax(0,1fr) 112px;align-items:center;gap:6px 14px}
+.mm{font-weight:600;white-space:nowrap}
+.mm small{display:block;font-weight:400;font-size:11px;color:var(--muted)}
+.mbar{position:relative;height:14px;border-radius:7px;background:rgba(90,105,160,.08)}
+.mbar::before{content:"";position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:var(--line)}
+.mbar i{position:absolute;top:0;bottom:0;border-radius:7px}
+.mbar i.pos{left:50%;background:linear-gradient(90deg,#6fe0ae,#3ecf8e)}
+.mbar i.neg{right:50%;background:linear-gradient(270deg,#ff9aa8,#fb7185)}
+.mv{text-align:right;white-space:nowrap}
+.mv b{display:block;font-size:15px}.mv small{font-size:12px}
+.mv.pos b,.mv.pos small{color:var(--pos)}.mv.neg b,.mv.neg small{color:var(--neg)}
+.mfoot{grid-column:1/-1;margin-top:-4px;font-size:12px;color:var(--muted)}
+@media (max-width:560px){.mrow{grid-template-columns:92px minmax(0,1fr) 92px}}
 .monthnav{display:flex;align-items:center;gap:10px}
 .monthnav h3{min-width:104px;text-align:center}
 .bars{display:grid;gap:10px;margin-top:10px}

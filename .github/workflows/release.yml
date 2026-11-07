@@ -1,0 +1,125 @@
+# Builds the Windows installers, signs them for the in-app updater, checks that nothing is missing and only then
+# publishes the release (it stays a draft until every check passes, so users never see a half-built release).
+#
+# Run it either way:
+#   1. push a tag:           git tag v0.17.0 && git push origin v0.17.0
+#   2. Actions -> Release -> Run workflow, version "0.17.0"
+# Needs the repository secret TAURI_SIGNING_PRIVATE_KEY (contents of the updater private key file) and, only if the
+# key has a password, TAURI_SIGNING_PRIVATE_KEY_PASSWORD. The notes live in release-notes/v<version>.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.17.0 (must match tauri.conf.json, package.json and Cargo.toml)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version and check the repository is ready
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then V="$INPUT_VERSION"; else V="$GITHUB_REF_NAME"; fi
+          V="${V#v}"
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+          [ -n "$SIGNING_KEY" ] || { echo "::error::Repository secret TAURI_SIGNING_PRIVATE_KEY is not set"; exit 1; }
+
+          conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./package.json').version")
+          cargo=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'"' -f2)
+          for pair in "tauri.conf.json=$conf" "package.json=$pkg" "Cargo.toml=$cargo"; do
+            [ "${pair#*=}" = "$V" ] || { echo "::error::${pair%%=*} says ${pair#*=}, but releasing $V"; exit 1; }
+          done
+
+          notes="release-notes/v$V.md"
+          [ -s "$notes" ] || { echo "::error::$notes is missing or empty - write the release notes first"; exit 1; }
+
+          # notes + the standard install section, so no release ships without it
+          {
+            cat "$notes"
+            printf '\n\n### 安裝與更新\n'
+            printf -- '- 已安裝 v0.13.0 以上的使用者會在啟動時收到更新提示，一鍵更新\n'
+            printf -- '- v0.12.0 以前的使用者請先手動安裝一次（簽章金鑰已更換）\n'
+            printf -- '- 手動安裝：`MoneyPi_%s_x64-setup.exe`（建議）或 `MoneyPi_%s_x64_en-US.msi`\n' "$V" "$V"
+            printf -- '- 安裝檔未經程式碼簽章，Windows SmartScreen 可能會提示，請選「更多資訊 → 仍要執行」\n'
+          } > "$RUNNER_TEMP/release-body.md"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Build, sign and upload to a draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v${{ env.VERSION }}
+          releaseName: MoneyPi v${{ env.VERSION }}
+          commitish: ${{ github.sha }}
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+      - name: Check that nothing is missing
+        run: |
+          set -euo pipefail
+          V="$VERSION"
+          gh release view "v$V" --json assets,isDraft > "$RUNNER_TEMP/release.json"
+          node - "$V" "$RUNNER_TEMP/release.json" <<'JS'
+          const [v, file] = process.argv.slice(2);
+          const r = JSON.parse(require("fs").readFileSync(file, "utf8"));
+          const have = new Set(r.assets.map((a) => a.name));
+          const need = [`MoneyPi_${v}_x64-setup.exe`, `MoneyPi_${v}_x64-setup.exe.sig`, `MoneyPi_${v}_x64_en-US.msi`, `MoneyPi_${v}_x64_en-US.msi.sig`, "latest.json"];
+          const missing = need.filter((n) => !have.has(n));
+          if (missing.length) { console.log("::error::Missing release assets: " + missing.join(", ")); process.exit(1); }
+          console.log("assets ok:", need.join(", "));
+          JS
+          gh release download "v$V" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
+          node - "$V" "$RUNNER_TEMP/latest.json" <<'JS'
+          const [v, file] = process.argv.slice(2);
+          const j = JSON.parse(require("fs").readFileSync(file, "utf8"));
+          const p = j.platforms && j.platforms["windows-x86_64"];
+          if (j.version !== v) { console.log(`::error::latest.json version ${j.version} != ${v}`); process.exit(1); }
+          if (!p || !p.signature || !p.url.endsWith(`MoneyPi_${v}_x64-setup.exe`)) { console.log("::error::latest.json has no valid windows-x86_64 entry"); process.exit(1); }
+          console.log("latest.json ok");
+          JS
+
+      - name: Write the notes and publish
+        run: |
+          set -euo pipefail
+          gh release edit "v$VERSION" --title "MoneyPi v$VERSION" --notes-file "$RUNNER_TEMP/release-body.md" --draft=false --latest
