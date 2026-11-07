@@ -67,7 +67,7 @@ function askPin(msg) {
   });
 }
 
-let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_min: 0, cashflow: [] };
+let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_sec: 0, cashflow: [] };
 const ui = {
   kind: "all", cat: "", q: "", sort: "value", range: 0, fcRange: "1y", rm: new Date().toLocaleDateString("sv-SE").slice(0, 7), sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
   hidden: store.get("hidden", "0") === "1",
@@ -1204,7 +1204,8 @@ async function runPlans(announce) {
 
 /* ---------- performance mode ---------- */
 // off = full effects, on = lite, auto = lite on low battery or when the system asks for reduced motion.
-let perfMode = store.get("perf", "auto"), lowBattery = false, slowDevice = store.get("perfSlow", "0") === "1";
+let perfMode = store.get("perf", inTauri ? "auto" : "on"), // the phone/tablet web version starts in power-saving mode
+   lowBattery = false, slowDevice = store.get("perfSlow", "0") === "1";
 const mqReduce = matchMedia("(prefers-reduced-motion: reduce)");
 const liteOn = () => perfMode === "on" || (perfMode === "auto" && (mqReduce.matches || lowBattery || slowDevice));
 function applyPerf() {
@@ -1458,15 +1459,15 @@ function rateRow(code, val) {
 
 function setRefreshSeg(m) {
   refreshSel = m;
-  [...$("refresh-seg").children].forEach((b) => b.classList.toggle("on", Number(b.dataset.m) === m));
+  [...$("refresh-seg").children].forEach((b) => b.classList.toggle("on", Number(b.dataset.s) === m));
 }
 $("refresh-seg").onclick = (e) => {
   const b = e.target.closest("button");
-  if (b) setRefreshSeg(Number(b.dataset.m));
+  if (b) setRefreshSeg(Number(b.dataset.s));
 };
 
 async function openSettings() {
-  setRefreshSeg(data.refresh_min || 0);
+  setRefreshSeg(data.refresh_sec || 0);
   $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
   $("new-code").value = $("new-rate").value = "";
   $("serr").textContent = "";
@@ -1495,7 +1496,7 @@ sform.onsubmit = async (e) => {
   }
   try {
     data = await invoke("set_settings", {
-      rates, refresh_min: refreshSel,
+      rates, refresh_sec: refreshSel,
     });
     sdlg.close();
     render();
@@ -1507,31 +1508,44 @@ sform.onsubmit = async (e) => {
 };
 
 /* ---------- quote sync ---------- */
-let refreshing = false, refreshTimer = 0;
+let refreshing = false, refreshTimer = 0, lastRefresh = 0;
 async function doRefresh(manual) {
   if (refreshing) return;
   refreshing = true;
   $("refresh-btn").classList.add("spin");
   try {
     const r = await invoke("refresh_quotes");
-    data = r.data;
-    render();
+    if (JSON.stringify(r.data) !== JSON.stringify(data)) { data = r.data; quietRender(); }
     const msg = `已更新 ${r.updated} 檔報價、${r.rates} 個匯率` + (r.failed.length ? `；失敗：${r.failed.join("、")}` : "");
     if (manual || r.failed.length) toast(msg);
   } catch (err) {
     if (manual) toast("同步失敗：" + err);
   } finally {
     refreshing = false;
+    lastRefresh = Date.now();
     $("refresh-btn").classList.remove("spin");
   }
 }
 $("refresh-btn").onclick = () => doRefresh(true);
 
+// Background re-render: same as render(), but the cards do not replay their pop-in animation every few seconds.
+function quietRender() {
+  render();
+  document.querySelectorAll(".view>.glass,.cards>.card").forEach((el) => (el.style.animation = "none"));
+}
+
+// Auto refresh never runs while the window is hidden, a dialog is open or the user is typing.
+const busyForRefresh = () => document.hidden || document.querySelector("dialog[open]") || /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
 function scheduleRefresh() {
   clearInterval(refreshTimer);
-  // Only the desktop app drives quote refresh; LAN browsers just pick up the results via polling.
-  if (inTauri && data.refresh_min > 0) refreshTimer = setInterval(() => { if (!(liteOn() && document.hidden)) doRefresh(false); }, data.refresh_min * 60000);
+  // Only the desktop app drives quote refresh; LAN browsers just pick up the results via live sync.
+  const sec = data.refresh_sec || 0;
+  if (inTauri && sec > 0) refreshTimer = setInterval(() => { if (!busyForRefresh()) doRefresh(false); }, sec * 1000);
 }
+document.addEventListener("visibilitychange", () => { // back in view: catch up at once if the last refresh is older than the interval
+  const sec = data.refresh_sec || 0;
+  if (inTauri && sec > 0 && !document.hidden && Date.now() - lastRefresh > sec * 1000) doRefresh(false);
+});
 
 // Live sync: the host bumps a revision on every write and answers `wait_rev` the moment it changes (long poll, ~20 s
 // otherwise), so edits from the phone show up on the PC (and vice versa) within a fraction of a second with almost no traffic.
@@ -1541,7 +1555,7 @@ async function syncNow() {
   syncStale = false;
   try {
     const d = await invoke("get_data");
-    if (JSON.stringify(d) !== JSON.stringify(data)) { data = d; render(); }
+    if (JSON.stringify(d) !== JSON.stringify(data)) { data = d; quietRender(); }
   } catch {}
 }
 document.addEventListener("close", () => { if (syncStale) syncNow(); }, true); // dialog closed: apply what arrived meanwhile
@@ -2178,10 +2192,17 @@ document.addEventListener("input", (e) => {
 
 /* ---------- boot ---------- */
 document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !inTauri));
+// Launch splash: shown while the app loads, at least 0.9 s so the animation reads, then fades out.
+function hideSplash() {
+  const sp = $("splash");
+  if (!sp) return;
+  setTimeout(() => { sp.classList.add("out"); setTimeout(() => sp.remove(), 500); }, Math.max(0, 900 - performance.now()));
+}
 async function boot() {
   const st = await invoke("lock_status");
   $("lock-btn").hidden = !(inTauri && st.encrypted);
   if (st.locked) {
+    hideSplash();
     if (!inTauri) {
       document.body.innerHTML = '<p style="margin:40px 20px;font:16px sans-serif">電腦上的 MoneyPi 已鎖定。請先在電腦輸入密碼解鎖，再重新整理這個頁面。</p>';
       return;
@@ -2190,13 +2211,14 @@ async function boot() {
   }
   data = await invoke("get_data");
   render();
+  hideSplash();
   scheduleRefresh();
-  if (inTauri && data.refresh_min > 0) doRefresh(false);
+  if (inTauri && data.refresh_sec > 0) doRefresh(false);
   runPlans(false).then(() => runDividends(false));
   setInterval(() => runPlans(false).then(() => runDividends(false)), 3600e3);
   if (store.get("toured", "0") !== "1") setTimeout(startTour, 1200);
 }
-boot().catch((err) => toast(String(err)));
+boot().catch((err) => { hideSplash(); toast(String(err)); });
 if (inTauri) {
   invoke("get_sync").then(showPhone).catch(() => {});
   setTimeout(() => checkUpdate(false), 4000);

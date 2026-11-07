@@ -15,6 +15,11 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div id="splash" aria-hidden="true">
+  <div class="sp-core"><i class="sp-ring"></i><i class="sp-ring r2"></i><img class="sp-logo" src="icon-192.png" alt="" width="84" height="84"></div>
+  <b class="sp-name">MoneyPi</b>
+  <span class="sp-bar"><i></i></span>
+</div>
 <div class="orbs" aria-hidden="true"><i></i><i></i><i></i></div>
 
 <div class="app" id="app">
@@ -377,8 +382,9 @@
 
     <h4>股價與匯率自動更新</h4>
     <div class="seg" id="refresh-seg">
-      <button type="button" data-m="0">關閉</button><button type="button" data-m="5">5 分</button><button type="button" data-m="15">15 分</button><button type="button" data-m="30">30 分</button><button type="button" data-m="60">60 分</button>
+      <button type="button" data-s="0">關閉</button><button type="button" data-s="15">15 秒</button><button type="button" data-s="30">30 秒</button><button type="button" data-s="60">1 分</button><button type="button" data-s="300">5 分</button><button type="button" data-s="900">15 分</button>
     </div>
+    <p class="hint">報價與匯率會同時抓取，間隔越短越即時；視窗隱藏或正在編輯時會自動暫停。</p>
 
     <h4>匯率（1 單位折合 TWD）</h4>
     <div id="rates"></div>

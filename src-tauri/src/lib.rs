@@ -195,9 +195,12 @@ struct Data {
     goals: Vec<Goal>,
     #[serde(default)]
     next_goal: u64,
-    /// Auto quote refresh interval in minutes (0 = off); the frontend drives the timer.
-    #[serde(default)]
+    /// Legacy refresh interval in minutes (pre-0.18); migrated into `refresh_sec` on load and never written back.
+    #[serde(default, skip_serializing)]
     refresh_min: u32,
+    /// Auto quote refresh interval in seconds (0 = off); the frontend drives the timer.
+    #[serde(default)]
+    refresh_sec: u32,
     #[serde(default)]
     sync_enabled: bool,
     #[serde(default = "default_port")]
@@ -238,6 +241,7 @@ impl Default for Data {
             goals: vec![],
             next_goal: 0,
             refresh_min: 0,
+            refresh_sec: 60,
             sync_enabled: false,
             sync_port: DEFAULT_PORT,
             sync_pin: String::new(),
@@ -290,6 +294,12 @@ fn migrate(d: &mut Data) {
     }
     d.goal = 0.0;
     d.goal_date.clear();
+    if d.refresh_min > 0 {
+        if d.refresh_sec == 0 {
+            d.refresh_sec = d.refresh_min * 60;
+        }
+        d.refresh_min = 0;
+    }
 }
 
 fn goal_value(d: &Data, g: &Goal) -> f64 {
@@ -1511,7 +1521,7 @@ impl Core {
     fn set_settings(
         &self,
         rates: BTreeMap<String, f64>,
-        refresh_min: u32,
+        refresh_sec: u32,
     ) -> Result<Value, String> {
         if rates.get(BASE) != Some(&1.0) {
             return Err("TWD 匯率必須為 1".into());
@@ -1519,7 +1529,7 @@ impl Core {
         if rates.values().any(|r| !r.is_finite() || *r <= 0.0) {
             return Err("匯率必須為正數".into());
         }
-        if !matches!(refresh_min, 0 | 5 | 15 | 30 | 60) {
+        if !matches!(refresh_sec, 0 | 15 | 30 | 60 | 300 | 900) {
             return Err("不支援的更新間隔".into());
         }
         let mut d = self.data.lock().unwrap();
@@ -1527,7 +1537,7 @@ impl Core {
             return Err(format!("「{}」仍使用幣別 {}，無法移除", a.name, a.currency));
         }
         d.rates = rates;
-        d.refresh_min = refresh_min;
+        d.refresh_sec = refresh_sec;
         for a in d.assets.iter_mut() {
             recompute(a);
         }
@@ -1552,17 +1562,25 @@ impl Core {
             (t, c)
         };
 
+        // Fetch in parallel (8 at a time): one slow Yahoo reply no longer holds up all the others.
         let mut quotes: Vec<(u64, Result<Quote, String>)> = vec![];
-        for (id, sym, market) in &targets {
-            quotes.push((*id, fetch_quote(sym, market)));
+        for chunk in targets.chunks(8) {
+            let part: Vec<(u64, Result<Quote, String>)> = thread::scope(|s| {
+                let handles: Vec<_> = chunk.iter().map(|(id, sym, market)| s.spawn(move || (*id, fetch_quote(sym, market)))).collect();
+                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| (0, Err("內部錯誤".to_string())))).collect()
+            });
+            quotes.extend(part);
         }
         let mut fx: Vec<(String, f64)> = vec![];
-        for cur in &currencies {
-            if let Ok(q) = fetch_yahoo(&format!("{cur}TWD=X")) {
-                if q.price > 0.0 {
-                    fx.push((cur.clone(), q.price));
-                }
-            }
+        for chunk in currencies.chunks(8) {
+            let part: Vec<Option<(String, f64)>> = thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|cur| s.spawn(move || fetch_yahoo(&format!("{cur}TWD=X")).ok().filter(|q| q.price > 0.0).map(|q| (cur.clone(), q.price))))
+                    .collect();
+                handles.into_iter().map(|h| h.join().ok().flatten()).collect()
+            });
+            fx.extend(part.into_iter().flatten());
         }
 
         let mut d = self.data.lock().unwrap();
@@ -2285,7 +2303,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "delete_asset" => core.delete_asset(arg(&args, "id")?),
         "add_tx" => core.add_tx(arg(&args, "id")?, arg(&args, "tx")?),
         "delete_tx" => core.delete_tx(arg(&args, "id")?, arg(&args, "index")?),
-        "set_settings" => core.set_settings(arg(&args, "rates")?, arg(&args, "refresh_min")?),
+        "set_settings" => core.set_settings(arg(&args, "rates")?, arg(&args, "refresh_sec")?),
         "save_goal" => core.save_goal(arg(&args, "goal")?),
         "delete_goal" => core.delete_goal(arg(&args, "id")?),
         "refresh_quotes" => core.refresh_quotes(),
