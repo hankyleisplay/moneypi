@@ -114,7 +114,7 @@ class Dropdown {
     this.opts = [];
     this.value = "";
     this.act = -1;
-    root.innerHTML = `<button type="button" class="dd-btn" aria-haspopup="listbox"><span></span>
+    root.innerHTML = `<button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false"><span></span>
       <svg viewBox="0 0 24 24" width="14" height="14"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       <ul class="dd-menu" role="listbox" hidden></ul>`;
     this.btn = root.firstElementChild;
@@ -150,6 +150,7 @@ class Dropdown {
   }
   open() {
     this.menu.hidden = false;
+    this.btn.setAttribute("aria-expanded", "true");
     this.root.classList.add("open");
     const r = this.btn.getBoundingClientRect();
     this.root.classList.toggle("up", r.bottom + 240 > innerHeight && r.top > 240);
@@ -158,6 +159,7 @@ class Dropdown {
   }
   close() {
     this.menu.hidden = true;
+    this.btn.setAttribute("aria-expanded", "false");
     this.root.classList.remove("open", "up");
   }
   hilite() {
@@ -922,7 +924,7 @@ $("trend").addEventListener("keydown", (e) => {
 });
 
 function renderInvestmentIdeas() {
-  const risk = $("invest-risk").value;
+  const risk = ddInvestRisk.value;
   const assets = data.assets.filter(a => !a.liability && toBase(a) > 0);
   const total = sum(assets), stocks = assets.filter(a => a.category === "股票" || a.category === "基金/ETF");
   const biggest = [...stocks].sort((a,b) => toBase(b) - toBase(a))[0];
@@ -933,10 +935,25 @@ function renderInvestmentIdeas() {
     balanced: [ ["01", "核心配置研究", "全球股票 ETF", "VT · 美股", "一次涵蓋多個國家股票；仍會隨股市下跌，並承擔匯率與海外稅務風險。", "https://investor.vanguard.com/investment-products/etfs/profile/vt"], ["02", "熟悉的市場", "台灣大型股 ETF", "0050 · 台股", "研究台灣大型企業的長期成長；留意單一市場、產業集中與成分股權重。", "https://www.yuantaetfs.com/product/detail/0050/Basic_information"] ],
     growth: [ ["01", "成長型核心", "美國大型股 ETF", "VOO · 美股", "研究美國大型企業；評估估值、美元匯率及美國市場集中的風險。", "https://investor.vanguard.com/investment-products/etfs/profile/voo"], ["02", "個股研究方向", "台積電", "2330 · 台股", "從營收、現金流與資本支出研究半導體需求；單一公司波動與產業循環風險高。", "https://investor.tsmc.com/chinese"] ]
   };
-  $("invest-ideas").innerHTML = ideas[risk].map(([n,tag,name,symbol,reason,url]) => `<article class="invest-card"><span class="idea-index">${n}</span><span class="eyebrow">${tag}</span><h4>${name}</h4><span class="idea-symbol">${symbol}</span><p>${reason}</p><a href="${url}" target="_blank" rel="noopener noreferrer">閱讀官方資料 ↗</a></article>`).join("");
+  $("invest-ideas").innerHTML = ideas[risk].map(([n,tag,name,symbol,reason,url]) => `<article class="invest-card"><span class="idea-index">${n}</span><span class="eyebrow">${tag}</span><h4>${name}</h4><span class="idea-symbol">${symbol}</span><p>${reason}</p><a href="${url}" data-official-link target="_blank" rel="noopener noreferrer">閱讀官方資料 ↗</a></article>`).join("");
 }
-$("invest-risk").value = ["steady", "balanced", "growth"].includes(store.get("invest-risk", "balanced")) ? store.get("invest-risk", "balanced") : "balanced";
-$("invest-risk").addEventListener("change", () => { store.set("invest-risk", $("invest-risk").value); renderInvestmentIdeas(); });
+const ddInvestRisk = new Dropdown($("invest-risk"), (value) => {
+  store.set("invest-risk", value);
+  renderInvestmentIdeas();
+});
+ddInvestRisk.setOptions([
+  { value: "steady", label: "穩健" },
+  { value: "balanced", label: "均衡" },
+  { value: "growth", label: "積極" },
+], store.get("invest-risk", "balanced"));
+ddInvestRisk.btn.setAttribute("aria-labelledby", "invest-risk-label");
+$("invest-ideas").addEventListener("click", async (e) => {
+  const link = e.target.closest("a[data-official-link]");
+  if (!link || !inTauri) return; // Browsers use the normal link; desktop uses the system browser.
+  e.preventDefault();
+  try { await invoke("open_external", { target: link.href }); }
+  catch (err) { toast(`無法開啟官方資料：${String(err)}`); }
+});
 
 function drawAlloc() {
   const { g, W, H } = setupCanvas($("alloc"));
