@@ -432,3 +432,24 @@ html.rest *,html.rest *::before,html.rest *::after{animation-play-state:paused!i
 @keyframes spRing{0%{opacity:.7;transform:scale(.9)}100%{opacity:0;transform:scale(1.6)}}
 @keyframes spUp{0%{opacity:0;transform:translateY(10px)}100%{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){#splash{transition:none}}
+
+/* Portfolio research and a quieter, more legible wealth chart. */
+.trend-summary{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:18px 0 8px;flex-wrap:wrap}
+.trend-summary span,.trend-change small{display:block;font-size:11px;color:var(--muted)}
+.trend-summary strong{display:block;font-size:27px;letter-spacing:-1px;font-variant-numeric:tabular-nums;margin-top:4px}
+.trend-change{font-size:15px;font-weight:600;text-align:right}
+.trend-change small{font-weight:400;margin-top:5px}
+#trend{height:260px;touch-action:pan-y}
+#trend:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:12px}
+.trend-caption{font-size:10px;color:var(--muted);text-align:center;margin:10px 0 0}
+.invest-panel{margin-bottom:14px;background:linear-gradient(120deg,rgba(231,239,255,.8),rgba(255,255,255,.85))}
+.eyebrow{font-size:10px;letter-spacing:1.5px;color:var(--muted);font-weight:600}
+.invest-panel h3{margin-top:5px}.invest-select{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;white-space:nowrap}
+.invest-select select{border:1px solid var(--line);border-radius:12px;padding:8px;background:white;color:var(--text)}
+.invest-insight{font-size:13px;line-height:1.8;color:var(--muted);margin:12px 0 18px}
+.invest-ideas{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.invest-card{position:relative;background:rgba(255,255,255,.8);border:1px solid var(--line);border-radius:18px;padding:20px}
+.invest-card h4{font-size:19px;margin:10px 0 5px}.idea-symbol{font-size:12px;color:var(--muted)}
+.idea-index{float:right;font-size:24px;font-weight:600;color:#c7d4f1}.invest-card p{font-size:12px;line-height:1.8;color:var(--muted);min-height:44px}
+.invest-card a{font-size:12px;color:var(--accent);text-decoration:none}.invest-card a:hover{text-decoration:underline}
+@media(max-width:600px){.invest-ideas{grid-template-columns:1fr}.invest-panel .panel-head{align-items:flex-start;flex-wrap:wrap}.trend-summary strong{font-size:23px}#trend{height:230px}}

@@ -429,6 +429,7 @@ function render() {
   renderGoalHero();
   renderGoals();
   renderPortfolio();
+  renderInvestmentIdeas();
 
   const cats = [...new Set(data.assets.map((a) => a.category))].sort();
   if (!cats.includes(ui.cat)) ui.cat = "";
@@ -820,12 +821,14 @@ ro.observe($("trend"));
 
 function drawTrend() {
   const { g, W, H } = setupCanvas($("trend"));
-  const padL = ui.hidden ? 12 : 58, padR = 14, padT = 14, padB = 24;
+  const padL = ui.hidden ? 12 : Math.min(100, Math.max(62, W * .18)), padR = 22, padT = 24, padB = 30;
   let all = data.snapshots.map((s) => ({ date: s.date, v: s.assets - s.liabilities }));
   if (ui.range) {
     const cutStr = dateStr(Date.now() - ui.range * DAY);
     all = all.filter((p) => p.date >= cutStr);
   }
+  all = all.filter((p) => Number.isFinite(p.v)).sort((a, b) => a.date.localeCompare(b.date));
+  $("trend-summary").textContent = all.length ? "" : "開始記錄，讓每一份累積都看得見";
   g.font = "11px 'Segoe UI Variable', sans-serif";
   trendPts = [];
   if (!all.length) {
@@ -837,15 +840,18 @@ function drawTrend() {
   const netGoals = data.goals.filter((x) => !x.assets.length);
   if (all.length > 1) max = Math.max(max, ...netGoals.map((x) => x.amount).filter((a) => a <= max * 1.6));
   if (min === max) { const m = Math.abs(min) * 0.05 || 1; min -= m; max += m; }
-  const x = (i) => padL + (all.length === 1 ? (W - padL - padR) / 2 : (i * (W - padL - padR)) / (all.length - 1));
+  const first = all[0], last = all.at(-1), change = last.v - first.v;
+  $("trend-summary").innerHTML = `<div><span>期末淨資產</span><strong>${money(last.v)}</strong></div><div class="trend-change ${change >= 0 ? 'pos' : 'neg'}">${ui.hidden ? '••••' : `${signed(change)}${first.v > 0 ? ` (${signed(change / first.v * 100, fmt)}%)` : ''}`}<small>期間淨值變化 · 非投資報酬率</small></div>`;
+  const margin = (max - min) * .12; min -= margin; max += margin;
+  const x = (i) => padL + (all.length === 1 ? (W - padL - padR) / 2 : ((Date.parse(all[i].date) - Date.parse(first.date)) / (Date.parse(last.date) - Date.parse(first.date) || 1)) * (W - padL - padR));
   const y = (v) => padT + (1 - (v - min) / (max - min)) * (H - padT - padB);
   trendPts = all.map((p, i) => ({ ...p, x: x(i), y: y(p.v) }));
 
   g.lineWidth = 1; g.textAlign = "left";
   for (let i = 0; i <= 3; i++) {
     const v = min + ((max - min) * i) / 3, yy = y(v);
-    g.strokeStyle = css("--line");
-    g.beginPath(); g.moveTo(padL, yy); g.lineTo(W - padR, yy); g.stroke();
+    g.setLineDash([3, 5]); g.strokeStyle = css("--line");
+    g.beginPath(); g.moveTo(padL, yy); g.lineTo(W - padR, yy); g.stroke(); g.setLineDash([]);
     if (!ui.hidden) { g.fillStyle = css("--muted"); g.fillText(fmt0.format(v), 2, yy + 3); }
   }
   netGoals.filter((x) => x.amount >= min && x.amount <= max).slice(0, 4).forEach((x) => { // goal lines
@@ -857,19 +863,28 @@ function drawTrend() {
   });
   const accent = css("--accent");
   const grad = g.createLinearGradient(0, padT, 0, H - padB);
-  grad.addColorStop(0, accent + "55");
+  grad.addColorStop(0, accent + "38");
   grad.addColorStop(1, accent + "00");
-  g.beginPath();
-  trendPts.forEach((p, i) => (i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)));
+  const trace = () => {
+    g.moveTo(trendPts[0].x, trendPts[0].y);
+    for (let i = 1; i < trendPts.length; i++) {
+      const a = trendPts[i - 1], b = trendPts[i], mid = (a.x + b.x) / 2;
+      g.bezierCurveTo(mid, a.y, mid, b.y, b.x, b.y);
+    }
+  };
+  g.beginPath(); trace();
   g.lineTo(trendPts.at(-1).x, H - padB); g.lineTo(trendPts[0].x, H - padB); g.closePath();
   g.fillStyle = grad; g.fill();
 
   g.strokeStyle = accent; g.lineWidth = 2.5; g.lineJoin = "round";
   g.beginPath();
-  trendPts.forEach((p, i) => (i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)));
+  trace();
   g.stroke();
   g.fillStyle = accent;
-  trendPts.forEach((p) => { g.beginPath(); g.arc(p.x, p.y, 3, 0, 7); g.fill(); });
+  const end = trendPts.at(-1);
+  g.fillStyle = accent + "20"; g.beginPath(); g.arc(end.x, end.y, 9, 0, 7); g.fill();
+  g.fillStyle = accent; g.beginPath(); g.arc(end.x, end.y, 4, 0, 7); g.fill();
+  g.strokeStyle = "#fff"; g.lineWidth = 2; g.stroke();
 
   g.fillStyle = css("--muted");
   g.textAlign = "left"; g.fillText(trendPts[0].date, padL, H - 6);
@@ -898,6 +913,30 @@ $("trend").addEventListener("mousemove", (e) => {
 });
 let hoverRaf = 0;
 $("trend").addEventListener("mouseleave", () => { ui.hover = -1; drawTrend(); });
+
+$("trend").addEventListener("keydown", (e) => {
+  if (!["ArrowLeft", "ArrowRight"].includes(e.key) || !trendPts.length) return;
+  e.preventDefault();
+  ui.hover = Math.max(0, Math.min(trendPts.length - 1, ui.hover < 0 ? trendPts.length - 1 : ui.hover + (e.key === "ArrowLeft" ? -1 : 1)));
+  drawTrend();
+});
+
+function renderInvestmentIdeas() {
+  const risk = $("invest-risk").value;
+  const assets = data.assets.filter(a => !a.liability && toBase(a) > 0);
+  const total = sum(assets), stocks = assets.filter(a => a.category === "股票" || a.category === "基金/ETF");
+  const biggest = [...stocks].sort((a,b) => toBase(b) - toBase(a))[0];
+  const concentration = biggest && total > 0 ? toBase(biggest) / total : 0;
+  $("invest-insight").textContent = !assets.length ? "先記錄資產，再讓配置分析陪你挑選研究方向。以下為各類投資工具的研究起點。" : concentration > .3 ? `${ui.hidden ? "目前最大投資部位" : biggest.name}佔總資產超過 30%。新增投資前，可先研究分散市場與降低單一部位集中的方式。` : "從分散配置出發，選擇你理解、也能長期持有的標的。以下清單依你選擇的投資風格調整。";
+  const ideas = {
+    steady: [ ["01", "先守住投資節奏", "短天期美國公債 ETF", "SGOV · 美股", "適合研究短期資金停泊；仍有美元匯率、利率與交易成本風險。", "https://www.ishares.com/us/products/314116/ishares-0-3-month-treasury-bond-etf"], ["02", "小比例參與市場", "台灣大型股 ETF", "0050 · 台股", "以一籃子大型股取代押注個股；台灣市場與半導體產業仍較集中。", "https://www.yuantaetfs.com/product/detail/0050/Basic_information"] ],
+    balanced: [ ["01", "核心配置研究", "全球股票 ETF", "VT · 美股", "一次涵蓋多個國家股票；仍會隨股市下跌，並承擔匯率與海外稅務風險。", "https://investor.vanguard.com/investment-products/etfs/profile/vt"], ["02", "熟悉的市場", "台灣大型股 ETF", "0050 · 台股", "研究台灣大型企業的長期成長；留意單一市場、產業集中與成分股權重。", "https://www.yuantaetfs.com/product/detail/0050/Basic_information"] ],
+    growth: [ ["01", "成長型核心", "美國大型股 ETF", "VOO · 美股", "研究美國大型企業；評估估值、美元匯率及美國市場集中的風險。", "https://investor.vanguard.com/investment-products/etfs/profile/voo"], ["02", "個股研究方向", "台積電", "2330 · 台股", "從營收、現金流與資本支出研究半導體需求；單一公司波動與產業循環風險高。", "https://investor.tsmc.com/chinese"] ]
+  };
+  $("invest-ideas").innerHTML = ideas[risk].map(([n,tag,name,symbol,reason,url]) => `<article class="invest-card"><span class="idea-index">${n}</span><span class="eyebrow">${tag}</span><h4>${name}</h4><span class="idea-symbol">${symbol}</span><p>${reason}</p><a href="${url}" target="_blank" rel="noopener noreferrer">閱讀官方資料 ↗</a></article>`).join("");
+}
+$("invest-risk").value = ["steady", "balanced", "growth"].includes(store.get("invest-risk", "balanced")) ? store.get("invest-risk", "balanced") : "balanced";
+$("invest-risk").addEventListener("change", () => { store.set("invest-risk", $("invest-risk").value); renderInvestmentIdeas(); });
 
 function drawAlloc() {
   const { g, W, H } = setupCanvas($("alloc"));

@@ -120,13 +120,23 @@
               <button data-r="30">1月</button><button data-r="90">3月</button><button data-r="365">1年</button><button data-r="0" class="on">全部</button>
             </div>
           </div>
-          <canvas id="trend"></canvas>
+          <div id="trend-summary" class="trend-summary" aria-live="polite"></div>
+          <canvas id="trend" tabindex="0" aria-label="淨資產走勢，可使用左右方向鍵查看每日數值"></canvas>
+          <p class="trend-caption">淨資產 = 總資產 − 總負債 · 移動游標或使用方向鍵查看</p>
         </div>
         <div class="glass panel">
           <h3>資產配置</h3>
           <canvas id="alloc"></canvas>
           <ul id="legend"></ul>
         </div>
+      </section>
+      <section class="glass panel invest-panel" aria-labelledby="invest-title">
+        <div class="panel-head"><div><span class="eyebrow">INVESTMENT IDEAS</span><h3 id="invest-title">找到適合你的下一步</h3></div>
+          <label class="invest-select">投資風格 <select id="invest-risk"><option value="steady">穩健</option><option value="balanced" selected>均衡</option><option value="growth">積極</option></select></label>
+        </div>
+        <p id="invest-insight" class="invest-insight"></p>
+        <div id="invest-ideas" class="invest-ideas"></div>
+        <p class="note">依投資風格與目前配置產生的研究清單，非即時行情或買賣訊號。未評估你的收入、緊急預備金與投資期限；投資前請閱讀公開說明書、確認費用與風險。</p>
       </section>
       <section class="glass panel">
         <div class="panel-head"><h3>每月淨資產變化</h3></div>
