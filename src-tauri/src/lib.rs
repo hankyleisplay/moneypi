@@ -2647,6 +2647,90 @@ mod tests {
     }
 
     #[test]
+    fn legacy_refresh_minutes_become_seconds() {
+        let mut d: Data = serde_json::from_str(r#"{"next_id":0,"assets":[],"snapshots":[],"refresh_min":15}"#).unwrap();
+        migrate(&mut d);
+        migrate(&mut d);
+        assert_eq!((d.refresh_sec, d.refresh_min), (900, 0));
+        let mut off: Data = serde_json::from_str(r#"{"next_id":0,"assets":[],"snapshots":[]}"#).unwrap();
+        migrate(&mut off);
+        assert_eq!(off.refresh_sec, 0, "an old file without the setting stays off");
+        assert!(!serde_json::to_string(&d).unwrap().contains("refresh_min"));
+        let core = temp_core("settings");
+        assert!(core.set_settings([(BASE.to_string(), 1.0)].into(), 7).is_err(), "unsupported interval");
+        assert!(core.set_settings([(BASE.to_string(), 1.0)].into(), 15).is_ok());
+        assert_eq!(core.data.lock().unwrap().refresh_sec, 15);
+    }
+
+    #[test]
+    fn wait_rev_returns_when_data_changes() {
+        let core = std::sync::Arc::new(temp_core("rev"));
+        let r0 = core.wait_rev(-1)["rev"].as_i64().unwrap();
+        let c2 = core.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            let d = c2.data.lock().unwrap();
+            c2.persist(&d).unwrap();
+        });
+        let t = Instant::now();
+        let r1 = core.wait_rev(r0)["rev"].as_i64().unwrap();
+        assert!(r1 > r0 && t.elapsed() < Duration::from_secs(3), "woke on the write, not on the timeout");
+    }
+
+    /// Real Yahoo requests: `cargo test live_refresh -- --ignored --nocapture`
+    #[test]
+    #[ignore = "uses the network"]
+    fn live_refresh_is_parallel() {
+        let core = temp_core("live");
+        let symbols = ["2330", "2317", "2454", "2412", "2882", "2881", "1301", "1303", "2002", "2603", "2308", "3711", "2891", "5880", "0050", "0056"];
+        {
+            let mut d = core.data.lock().unwrap();
+            for (i, sym) in symbols.iter().enumerate() {
+                d.assets.push(Asset { id: i as u64 + 1, name: sym.to_string(), category: "股票".into(), holding: true, symbol: sym.to_string(), market: "tw".into(), quantity: 1.0, ..Default::default() });
+            }
+        }
+        let t = Instant::now();
+        for sym in symbols {
+            let _ = fetch_quote(sym, "tw");
+        }
+        let seq = t.elapsed();
+        let t = Instant::now();
+        let r = core.refresh_quotes().unwrap();
+        let par = t.elapsed();
+        println!("sequential quotes only: {seq:?}\nrefresh_quotes (quotes + fx, parallel): {par:?}\nresult: updated={} rates={} failed={}", r["updated"], r["rates"], r["failed"]);
+        assert!(r["updated"].as_u64().unwrap() >= 12, "most symbols should have a price");
+        assert!(core.data.lock().unwrap().assets.iter().all(|a| a.price >= 0.0));
+    }
+
+    /// Smoke test with real exports: `MONEYPI_TRACKER=backup.json MONEYPI_HISTORY=history.csv cargo test real_files -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs MONEYPI_TRACKER / MONEYPI_HISTORY files"]
+    fn real_files_import_end_to_end() {
+        let core = Arc::new(temp_core("real"));
+        if let Ok(f) = std::env::var("MONEYPI_HISTORY") {
+            let r = dispatch(&core, "import_history", json!({ "text": std::fs::read_to_string(f).unwrap() }), false).unwrap();
+            println!("history: added={} skipped={}", r["added"], r["skipped"]);
+        }
+        if let Ok(f) = std::env::var("MONEYPI_TRACKER") {
+            let text = std::fs::read_to_string(f).unwrap();
+            let r = dispatch(&core, "import_tracker", json!({ "text": text }), false).unwrap();
+            println!("tracker: added={} dup={} days={} days_skipped={} skipped_tx={}", r["added"].as_array().unwrap().len(), r["duplicates"], r["days"], r["days_skipped"], r["skipped_tx"]);
+            let again = dispatch(&core, "import_tracker", json!({ "text": text }), false).unwrap();
+            assert_eq!(again["added"].as_array().unwrap().len(), 0, "second import must not duplicate holdings");
+            assert_eq!(again["duplicates"].as_array().unwrap().len(), r["added"].as_array().unwrap().len());
+        }
+        let d = core.data.lock().unwrap();
+        let (mut value, mut cost) = (0.0, 0.0);
+        for a in &d.assets {
+            println!("{:<16} {:<6} {:<5} qty={:<6} price={:<8} cost={:<10.2} value={:<10.2} txs={}", a.name.chars().take(8).collect::<String>(), a.symbol, a.market, a.quantity, a.price, a.cost, a.value, a.txs.len());
+            value += a.value;
+            cost += a.cost;
+        }
+        println!("assets={} snapshots={} total value={:.2} total cost={:.2}", d.assets.len(), d.snapshots.len(), value, cost);
+        assert!(d.assets.iter().all(|a| a.holding && a.quantity > 0.0 && a.value > 0.0));
+    }
+
+    #[test]
     fn legacy_goal_is_migrated_once() {
         let mut d: Data = serde_json::from_str(
             r#"{"next_id":0,"assets":[],"snapshots":[{"date":"2026-01-01","assets":100.0,"liabilities":40.0}],"goal":500.0,"goal_date":"2030-01-01"}"#,
