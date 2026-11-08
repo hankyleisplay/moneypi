@@ -90,6 +90,22 @@ jobs:
 
       - run: npm ci
 
+      # Fetch via the official GitHub API when the browser download endpoint times out.
+      # Hash pinned by tauri-cli 2.12.4's tauri-bundler Windows MSI implementation.
+      - name: Prepare verified WiX toolchain
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
+          gh release download wix3141rtm --repo wixtoolset/wix3 --pattern wix314-binaries.zip --dir $env:RUNNER_TEMP --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to download official WiX toolchain' }
+          $expected = '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'WiX SHA-256 verification failed'
+          }
+          $tools = Join-Path $env:LOCALAPPDATA 'tauri/WixTools314'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $tools -Force
+
       - name: Build, sign and upload to a draft release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -99,7 +115,7 @@ jobs:
         with:
           tagName: v${{ env.VERSION }}
           releaseName: MoneyPi v${{ env.VERSION }}
-          commitish: ${{ github.sha }}
+          releaseCommitish: ${{ github.sha }}
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
