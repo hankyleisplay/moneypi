@@ -453,3 +453,11 @@ html.rest *,html.rest *::before,html.rest *::after{animation-play-state:paused!i
 .idea-index{float:right;font-size:24px;font-weight:600;color:#c7d4f1}.invest-card p{font-size:12px;line-height:1.8;color:var(--muted);min-height:44px}
 .invest-card a{font-size:12px;color:var(--accent);text-decoration:none}.invest-card a:hover{text-decoration:underline}
 @media(max-width:600px){.invest-ideas{grid-template-columns:1fr}.invest-panel .panel-head{align-items:flex-start;flex-wrap:wrap}.trend-summary strong{font-size:23px}#trend{height:230px}}
+
+/* Keep hidden form labels hidden even when their component style sets display. */
+#value-wrap[hidden],#holding-toggle[hidden]{display:none!important}
+.invest-card .official-link{display:inline-flex;align-items:center;justify-content:center;gap:10px;padding:10px 15px;margin-top:8px;border:1px solid rgba(80,117,218,.18);border-radius:12px;background:linear-gradient(135deg,#f2f6ff,#e9efff);color:#385ab4;font-size:12px;font-weight:600;line-height:1.4;text-decoration:none;box-shadow:0 2px 4px rgba(60,90,170,.06),inset 0 1px 0 #fff;transition:background .18s,box-shadow .18s}
+.invest-card .official-link:hover{background:#e2eaff;box-shadow:0 4px 10px rgba(60,90,170,.12);text-decoration:none}
+.invest-card .official-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.invest-card .official-link:active{background:#d8e3ff}
+.official-link svg{flex:none}.holding-value-note{padding:10px 12px;border-radius:12px;background:rgba(80,117,218,.07);line-height:1.7}

@@ -184,8 +184,9 @@
       <label id="value-wrap">金額<input name="value" type="number" min="0" step="any" required></label>
     </div>
 
-    <label class="chk"><input name="holding" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>持倉（股票／基金：數量 × 單價）</span></label>
+    <label class="chk" id="holding-toggle" hidden><input name="holding" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>以持倉計算（數量 × 單價）</span></label>
     <div id="holding-fields" hidden>
+      <p class="hint holding-value-note">目前市值由數量 × 單價自動計算，不需另填金額。總成本用來計算損益，與目前市值不同。</p>
       <div class="two">
         <div class="field">行情來源<div class="dd" id="f-mkt"></div></div>
         <label>代號<input name="symbol" placeholder="2330、AAPL…" autocomplete="off"></label>

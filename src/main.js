@@ -935,7 +935,7 @@ function renderInvestmentIdeas() {
     balanced: [ ["01", "核心配置研究", "全球股票 ETF", "VT · 美股", "一次涵蓋多個國家股票；仍會隨股市下跌，並承擔匯率與海外稅務風險。", "https://investor.vanguard.com/investment-products/etfs/profile/vt"], ["02", "熟悉的市場", "台灣大型股 ETF", "0050 · 台股", "研究台灣大型企業的長期成長；留意單一市場、產業集中與成分股權重。", "https://www.yuantaetfs.com/product/detail/0050/Basic_information"] ],
     growth: [ ["01", "成長型核心", "美國大型股 ETF", "VOO · 美股", "研究美國大型企業；評估估值、美元匯率及美國市場集中的風險。", "https://investor.vanguard.com/investment-products/etfs/profile/voo"], ["02", "個股研究方向", "台積電", "2330 · 台股", "從營收、現金流與資本支出研究半導體需求；單一公司波動與產業循環風險高。", "https://investor.tsmc.com/chinese"] ]
   };
-  $("invest-ideas").innerHTML = ideas[risk].map(([n,tag,name,symbol,reason,url]) => `<article class="invest-card"><span class="idea-index">${n}</span><span class="eyebrow">${tag}</span><h4>${name}</h4><span class="idea-symbol">${symbol}</span><p>${reason}</p><a href="${url}" data-official-link target="_blank" rel="noopener noreferrer">閱讀官方資料 ↗</a></article>`).join("");
+  $("invest-ideas").innerHTML = ideas[risk].map(([n,tag,name,symbol,reason,url]) => `<article class="invest-card"><span class="idea-index">${n}</span><span class="eyebrow">${tag}</span><h4>${name}</h4><span class="idea-symbol">${symbol}</span><p>${reason}</p><a class="official-link" href="${url}" data-official-link target="_blank" rel="noopener noreferrer"><span>閱讀官方資料</span><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M10 5H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1v-5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></a></article>`).join("");
 }
 const ddInvestRisk = new Dropdown($("invest-risk"), (value) => {
   store.set("invest-risk", value);
@@ -1024,21 +1024,41 @@ function updateHoldHint() {
     : "";
 }
 
+const supportsHolding = (category) => category === "股票" || category === "基金/ETF";
 function syncHoldingUI() {
+  const eligible = supportsHolding(fCat.value);
+  $("holding-toggle").hidden = !eligible;
+  // Preserve existing transaction history; legacy holdings must be recategorized before saving.
+  if (!eligible && !editingHasTxs) form.holding.checked = false;
   const on = form.holding.checked;
   if ($("div-fields")) syncDivUI();
   $("holding-fields").hidden = !on;
   $("value-wrap").hidden = on;
   form.value.required = !on;
+  form.value.disabled = on;
   form.quantity.disabled = form.cost.disabled = on && editingHasTxs;
   updateHoldHint();
 }
-form.holding.onchange = syncHoldingUI;
-fCat.onChange = (v) => {
-  if (!editingId && (v === "股票" || v === "基金/ETF") && !form.holding.checked) {
+form.holding.onchange = () => {
+  if (editingHasTxs && !form.holding.checked) {
     form.holding.checked = true;
-    syncHoldingUI();
+    toast("此項目已有交易記錄，請先處理交易記錄再關閉持倉。");
   }
+  syncHoldingUI();
+};
+fCat.onChange = (v) => {
+  if (editingHasTxs && !supportsHolding(v)) {
+    const asset = data.assets.find(a => a.id === editingId);
+    fCat.setValue(asset.category);
+    toast("此項目已有交易記錄，請保留股票或基金類別，以免遺失持倉資料。");
+  } else if (!editingId) {
+    form.holding.checked = supportsHolding(v);
+  } else if (!supportsHolding(v) && form.holding.checked) {
+    // Carry the current market value into the manual amount when leaving holding mode.
+    form.value.value = num(form.quantity.value) * num(form.price.value);
+    form.holding.checked = false;
+  }
+  syncHoldingUI();
 };
 
 function openDialog(asset) {
@@ -1078,6 +1098,7 @@ $("add-btn").onclick = () => {
 form.onsubmit = async (e) => {
   e.preventDefault();
   try {
+    if (form.holding.checked && !supportsHolding(fCat.value)) throw "持倉僅適用股票與基金/ETF，請先調整類別。";
     const wasNew = !editingId, holding = form.holding.checked, market = holding ? fMkt.value : "";
     data = await invoke("save_asset", {
       asset: {
