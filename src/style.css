@@ -461,3 +461,15 @@ html.rest *,html.rest *::before,html.rest *::after{animation-play-state:paused!i
 .invest-card .official-link:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .invest-card .official-link:active{background:#d8e3ff}
 .official-link svg{flex:none}.holding-value-note{padding:10px 12px;border-radius:12px;background:rgba(80,117,218,.07);line-height:1.7}
+
+/* ---------- device sync chip ---------- */
+.peer-chip{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;font-size:12px;color:var(--muted);max-width:46vw}
+.peer-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.peer-chip i{flex:none;width:8px;height:8px;border-radius:50%;background:#9aa3c4}
+.peer-chip.ok i{background:var(--pos)}
+.peer-chip.syncing i{background:var(--accent);animation:spPulse 1s ease-in-out infinite}
+.peer-chip.offline i{background:#e0a030}
+.peer-chip.denied i,.peer-chip.error i{background:var(--neg)}
+@keyframes spPulse{50%{transform:scale(1.7);opacity:.4}}
+#peer-status.err{color:var(--neg)}
+#sdlg .peer-only label{margin-top:8px}

@@ -233,6 +233,52 @@ struct Data {
     /// Change stamps per record ("a:12", "g:3", "f:7", "p:2"), used to merge two devices. Deleted records stay as tombstones.
     #[serde(default)]
     stamps: BTreeMap<String, Stamp>,
+    /// The other device this one is bound to (never part of the data that is synced).
+    #[serde(default)]
+    peer: Option<Peer>,
+    /// Name shown on the other device; empty = the computer name / "手機".
+    #[serde(default)]
+    device_name: String,
+}
+
+/// The device this one syncs with: where to reach it and the PIN it expects.
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+struct Peer {
+    url: String,
+    pin: String,
+    name: String,
+    /// ms since epoch of the last successful sync
+    #[serde(default)]
+    last_sync: u64,
+}
+
+#[derive(Clone, Default)]
+struct PeerStatus {
+    /// "" | "syncing" | "ok" | "offline" | "denied" | "error"
+    state: String,
+    message: String,
+    at: u64,
+}
+
+enum PeerError {
+    Offline,
+    Denied(String),
+    Other(String),
+}
+impl PeerError {
+    fn state(&self) -> &'static str {
+        match self {
+            PeerError::Offline => "offline",
+            PeerError::Denied(_) => "denied",
+            PeerError::Other(_) => "error",
+        }
+    }
+    fn message(&self) -> String {
+        match self {
+            PeerError::Offline => "找不到對方：可能沒開機、不在同一個 Wi-Fi，或對方沒有開啟手機連線".into(),
+            PeerError::Denied(m) | PeerError::Other(m) => m.clone(),
+        }
+    }
 }
 
 /// When a record last changed (ms since epoch), a hash of its user-editable content, and whether it was deleted.
@@ -274,6 +320,8 @@ impl Default for Data {
             device: 0,
             primary: true,
             stamps: BTreeMap::new(),
+            peer: None,
+            device_name: String::new(),
         }
     }
 }
@@ -475,6 +523,29 @@ fn merge_payload(d: &mut Data, remote: &SyncPayload, now: u64) -> usize {
     changed
 }
 
+/// Read what the user typed or pasted when binding: "192.168.1.5:8787", "http://pc:8787/#pin=123456", …
+/// Returns the base url (no path) and the PIN (from the link's `#pin=` or the separate field).
+fn parse_peer_link(input: &str, pin: &str) -> Result<(String, String), String> {
+    let input = input.trim();
+    let (base, frag) = input.split_once('#').unwrap_or((input, ""));
+    let from_link = frag.split('&').find_map(|kv| kv.strip_prefix("pin=")).unwrap_or("");
+    let pin = if pin.trim().is_empty() { from_link } else { pin.trim() }.to_string();
+    let with_scheme = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
+    let (scheme, rest) = with_scheme.split_once("://").unwrap_or(("http", ""));
+    if !matches!(scheme, "http" | "https") {
+        return Err("位址需以 http:// 開頭".into());
+    }
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    if host.is_empty() || host.contains(char::is_whitespace) || host.contains('@') {
+        return Err("找不到電腦位址，請貼上手機連線的網址，例如 192.168.1.5:8787".into());
+    }
+    let host = if host.contains(':') { host.to_string() } else { format!("{host}:{DEFAULT_PORT}") };
+    if pin.is_empty() {
+        return Err("請輸入 PIN（在電腦的「手機連線」裡）".into());
+    }
+    Ok((format!("{scheme}://{host}"), pin))
+}
+
 fn migrate(d: &mut Data) {
     if d.goals.is_empty() && d.goal > 0.0 {
         d.next_goal += 1;
@@ -524,6 +595,9 @@ fn view(d: &Data) -> Value {
     if let Some(o) = v.as_object_mut() {
         o.remove("sync_pin");
         o.remove("stamps");
+        if let Some(p) = o.get_mut("peer").and_then(|p| p.as_object_mut()) {
+            p.remove("pin");
+        }
     }
     v
 }
@@ -774,6 +848,7 @@ struct Core {
     enc: Mutex<EncState>,
     /// Bumped on every write (and lock/unlock) so other windows/phones can notice changes without polling the data.
     rev: std::sync::atomic::AtomicU64,
+    peer_status: Mutex<PeerStatus>,
 }
 
 #[derive(Default, Clone)]
@@ -1879,7 +1954,150 @@ impl Core {
         let mut d = self.data.lock().unwrap();
         let changed = merge_payload(&mut d, &remote, now_ms());
         self.commit(&mut d)?;
-        Ok(json!({ "changed": changed, "payload": sync_payload(&d), "data": view(&d) }))
+        Ok(json!({ "changed": changed, "payload": sync_payload(&d) }))
+    }
+
+    fn my_name(&self) -> String {
+        let d = self.data.lock().unwrap();
+        if !d.device_name.trim().is_empty() {
+            return d.device_name.trim().to_string();
+        }
+        if cfg!(target_os = "android") {
+            "手機".into()
+        } else {
+            std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "電腦".into())
+        }
+    }
+
+    /// The `sync` command as the other device calls it over HTTP. If it says how to reach it back (`reply`), remember
+    /// that device as our peer, so that this side can start a sync later too (e.g. the computer checking the phone).
+    fn sync_cmd(&self, args: &Value, remote: bool) -> Result<Value, String> {
+        let payload: SyncPayload = serde_json::from_value(args["payload"].clone()).map_err(|e| format!("同步資料格式錯誤：{e}"))?;
+        let mut out = self.sync(payload)?;
+        if remote {
+            if let Some(r) = args["reply"].as_object() {
+                let (url, pin) = (r.get("url").and_then(Value::as_str).unwrap_or(""), r.get("pin").and_then(Value::as_str).unwrap_or(""));
+                if let Ok((url, pin)) = parse_peer_link(url, pin) {
+                    let mut d = self.data.lock().unwrap();
+                    let name = r.get("name").and_then(Value::as_str).unwrap_or("").trim().chars().take(40).collect::<String>();
+                    d.peer = Some(Peer { url, pin, name: if name.is_empty() { "另一台裝置".into() } else { name }, last_sync: now_ms() });
+                    let _ = self.persist(&mut d);
+                }
+            }
+        }
+        out["name"] = json!(self.my_name());
+        Ok(out)
+    }
+
+    /// How the other device can reach this one, if this one is listening.
+    fn reply_info(&self) -> Option<Value> {
+        let (running, port, pin) = {
+            let d = self.data.lock().unwrap();
+            (self.server.lock().unwrap().is_some(), d.sync_port, d.sync_pin.clone())
+        };
+        if !running || pin.is_empty() {
+            return None;
+        }
+        let ip = lan_ips().into_iter().next()?;
+        Some(json!({ "url": format!("http://{ip}:{port}"), "pin": pin, "name": self.my_name() }))
+    }
+
+    fn set_peer_status(&self, state: &str, message: &str) {
+        *self.peer_status.lock().unwrap() = PeerStatus { state: state.into(), message: message.into(), at: now_ms() };
+    }
+
+    /// One exchange with the bound device: send ours, merge theirs. Short timeouts, so an absent device costs seconds.
+    fn exchange_with(&self, url: &str, pin: &str) -> Result<(String, usize), PeerError> {
+        let payload = {
+            let mut d = self.data.lock().unwrap();
+            stamp(&mut d, now_ms());
+            sync_payload(&d)
+        };
+        let body = json!({ "payload": payload, "reply": self.reply_info() });
+        let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(3)).timeout(Duration::from_secs(20)).build();
+        let resp = agent.post(&format!("{url}/api/sync")).set("X-Token", pin).send_json(body).map_err(|e| match e {
+            ureq::Error::Status(401, _) => PeerError::Denied("PIN 不正確，或對方已更換 PIN".into()),
+            ureq::Error::Status(429, _) => PeerError::Denied("嘗試次數過多，請稍後再試".into()),
+            ureq::Error::Status(_, r) => PeerError::Other(r.into_json::<Value>().ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| "對方回應錯誤".into())),
+            ureq::Error::Transport(_) => PeerError::Offline,
+        })?;
+        let v: Value = resp.into_json().map_err(|e| PeerError::Other(format!("回應格式錯誤：{e}")))?;
+        let remote: SyncPayload = serde_json::from_value(v["payload"].clone()).map_err(|e| PeerError::Other(format!("同步資料格式錯誤：{e}")))?;
+        let merged = self.sync(remote).map_err(PeerError::Other)?;
+        Ok((v["name"].as_str().unwrap_or("").to_string(), merged["changed"].as_u64().unwrap_or(0) as usize))
+    }
+
+    /// Bind to the other device (first sync, which also tells it how to reach us), then keep it as the peer.
+    fn pair_peer(&self, link: &str, pin: &str) -> Result<Value, String> {
+        let (url, pin) = parse_peer_link(link, pin)?;
+        self.set_peer_status("syncing", "");
+        match self.exchange_with(&url, &pin) {
+            Ok((name, _)) => {
+                {
+                    let mut d = self.data.lock().unwrap();
+                    d.peer = Some(Peer { url, pin, name: if name.is_empty() { "另一台裝置".into() } else { name }, last_sync: now_ms() });
+                    self.persist(&mut d)?;
+                }
+                self.set_peer_status("ok", "");
+                Ok(self.peer_info())
+            }
+            Err(e) => {
+                self.set_peer_status(e.state(), &e.message());
+                Err(e.message())
+            }
+        }
+    }
+
+    /// Sync with the bound device (called when the app starts, comes back to the front, and after local edits).
+    fn sync_peer(&self) -> Result<Value, String> {
+        let Some(peer) = self.data.lock().unwrap().peer.clone() else { return Err("尚未綁定裝置".into()) };
+        self.set_peer_status("syncing", "");
+        match self.exchange_with(&peer.url, &peer.pin) {
+            Ok((name, changed)) => {
+                {
+                    let mut d = self.data.lock().unwrap();
+                    if let Some(p) = d.peer.as_mut() {
+                        p.last_sync = now_ms();
+                        if !name.is_empty() {
+                            p.name = name;
+                        }
+                    }
+                    self.persist(&mut d)?;
+                }
+                self.set_peer_status("ok", "");
+                let mut info = self.peer_info();
+                info["changed"] = json!(changed);
+                Ok(info)
+            }
+            Err(e) => {
+                self.set_peer_status(e.state(), &e.message());
+                Ok(self.peer_info()) // not a failure of the app: the other device just is not there
+            }
+        }
+    }
+
+    fn unpair_peer(&self) -> Value {
+        {
+            let mut d = self.data.lock().unwrap();
+            d.peer = None;
+            let _ = self.persist(&mut d);
+        }
+        self.set_peer_status("", "");
+        self.peer_info()
+    }
+
+    fn peer_info(&self) -> Value {
+        let d = self.data.lock().unwrap();
+        let st = self.peer_status.lock().unwrap().clone();
+        let listening = self.server.lock().unwrap().is_some();
+        json!({
+            "bound": d.peer.is_some(),
+            "name": d.peer.as_ref().map(|p| p.name.clone()),
+            "url": d.peer.as_ref().map(|p| p.url.clone()),
+            "last_sync": d.peer.as_ref().map(|p| p.last_sync),
+            "state": st.state, "message": st.message, "at": st.at,
+            "listening": listening, "device": d.device, "primary": d.primary,
+        })
     }
 
     /// Import holdings (with their transactions) and daily totals from an "Asset Tracker" JSON backup.
@@ -2548,7 +2766,11 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "delete_goal" => core.delete_goal(arg(&args, "id")?),
         "refresh_quotes" => core.refresh_quotes(),
         "export_csv" => Ok(Value::String(core.export_csv())),
-        "sync" => core.sync(serde_json::from_value(args["payload"].clone()).map_err(|e| format!("同步資料格式錯誤：{e}"))?),
+        "sync" => core.sync_cmd(&args, remote),
+        "peer_info" if !remote => Ok(core.peer_info()),
+        "pair_peer" if !remote => core.pair_peer(&arg::<String>(&args, "link")?, args["pin"].as_str().unwrap_or("")),
+        "sync_peer" if !remote => core.sync_peer(),
+        "unpair_peer" if !remote => Ok(core.unpair_peer()),
         "import_tracker" => core.import_tracker(&arg::<String>(&args, "text")?),
         "import_history" => core.import_history(&arg::<String>(&args, "text")?),
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
@@ -2757,7 +2979,19 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let path = dir.join("moneypi.json");
-            let (data, enc) = load_state(&path);
+            let (mut data, enc) = load_state(&path);
+            if cfg!(target_os = "android") {
+                // the phone is a secondary device: it listens (so the computer can find it while the app is open),
+                // has its own PIN and device number, and leaves plans and dividends to the computer
+                data.sync_enabled = true;
+                data.primary = false;
+                if data.sync_pin.is_empty() {
+                    data.sync_pin = (u32::from_str_radix(&random_hex(3), 16).unwrap_or(0) % 900_000 + 100_000).to_string();
+                }
+                while data.device == 0 {
+                    data.device = u32::from_str_radix(&random_hex(2), 16).unwrap_or(0);
+                }
+            }
             // a locked file is read after the password is entered
             let (enabled, port) = (data.sync_enabled && !enc.encrypted, data.sync_port);
             let core = Arc::new(Core {
@@ -2770,6 +3004,7 @@ pub fn run() {
                 plan_lock: Mutex::new(()),
                 enc: Mutex::new(enc),
                 rev: Default::default(),
+                peer_status: Default::default(),
             });
             if enabled {
                 if let Err(e) = core.start_server("0.0.0.0", port) {
@@ -3178,6 +3413,85 @@ mod tests {
     }
 
 
+    // --------------------------------------------------------------- pairing over real HTTP
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    #[test]
+    fn peer_links_are_read_leniently_and_checked() {
+        assert_eq!(parse_peer_link("192.168.1.5:8787", "123456").unwrap(), ("http://192.168.1.5:8787".into(), "123456".into()));
+        assert_eq!(parse_peer_link("http://pc.local:9000/#pin=424242", "").unwrap(), ("http://pc.local:9000".into(), "424242".into()));
+        assert_eq!(parse_peer_link(" 10.0.0.2 ", "1234").unwrap().0, format!("http://10.0.0.2:{DEFAULT_PORT}"));
+        assert_eq!(parse_peer_link("http://10.0.0.2:8787/#pin=1111", "2222").unwrap().1, "2222", "the typed PIN wins");
+        for bad in [("", "1234"), ("ftp://x:1", "1234"), ("http://", "1234"), ("http://user@host:1", "1234"), ("192.168.1.5:8787", "")] {
+            assert!(parse_peer_link(bad.0, bad.1).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn two_devices_pair_sync_both_ways_and_notice_when_the_other_is_gone() {
+        let (pc, phone) = pair();
+        let (pa, pb) = (free_port(), free_port());
+        for (c, pin, port) in [(&pc, "123456", pa), (&phone, "654321", pb)] {
+            {
+                let mut d = c.data.lock().unwrap();
+                d.sync_pin = pin.into();
+                d.sync_port = port;
+            }
+            c.start_server("0.0.0.0", port).unwrap();
+        }
+        save(&pc, cash("電腦存款", 100.0));
+        save(&phone, cash("手機現金", 50.0));
+
+        // wrong PIN: refused, nothing merged, status says so
+        let e = phone.pair_peer(&format!("127.0.0.1:{pa}"), "000000").unwrap_err();
+        assert!(e.contains("PIN"), "{e}");
+        assert_eq!(phone.peer_status.lock().unwrap().state, "denied");
+        assert_eq!(names(&phone), ["手機現金"]);
+
+        // right PIN: the first sync binds and merges
+        let info = phone.pair_peer(&format!("127.0.0.1:{pa}"), "123456").unwrap();
+        assert_eq!(info["bound"], true);
+        assert_eq!(names(&phone), ["手機現金", "電腦存款"]);
+        assert_eq!(names(&pc), names(&phone));
+        // the PC learned how to reach the phone, if it has a LAN address in this environment
+        let reachable_back = phone.reply_info().is_some();
+        println!("reverse direction testable: {reachable_back}");
+        assert_eq!(pc.data.lock().unwrap().peer.is_some(), reachable_back);
+        // the PIN never leaves through the view the UI gets
+        assert!(!serde_json::to_string(&view(&phone.data.lock().unwrap())).unwrap().contains("123456"));
+
+        // phone edits -> PC receives it when the phone syncs
+        save(&phone, cash("手機 2", 1.0));
+        assert_eq!(phone.sync_peer().unwrap()["state"], "ok");
+        assert_eq!(names(&pc), names(&phone));
+        // PC edits -> the PC checks the phone (the "computer starts up and looks for the phone" direction)
+        if reachable_back {
+            save(&pc, cash("電腦 2", 2.0));
+            assert_eq!(pc.sync_peer().unwrap()["state"], "ok");
+            assert_eq!(names(&phone), names(&pc));
+            assert_eq!(names(&pc).len(), 4);
+        }
+
+        // the PC is switched off: the phone reports it instead of failing
+        pc.stop_server();
+        thread::sleep(Duration::from_millis(200));
+        let t = Instant::now();
+        let r = phone.sync_peer().unwrap();
+        assert_eq!(r["state"], "offline");
+        assert!(t.elapsed() < Duration::from_secs(6));
+        save(&phone, cash("離線新增", 3.0)); // still works offline
+        assert!(names(&phone).contains(&"離線新增".to_string()));
+
+        // unbinding forgets the peer
+        assert_eq!(phone.unpair_peer()["bound"], false);
+        assert!(phone.sync_peer().is_err());
+        phone.stop_server();
+    }
+
+
     #[test]
     fn legacy_goal_is_migrated_once() {
         let mut d: Data = serde_json::from_str(
@@ -3238,6 +3552,7 @@ mod tests {
             plan_lock: Mutex::new(()),
             enc: Mutex::new(EncState::default()),
             rev: Default::default(),
+            peer_status: Default::default(),
         }
     }
 

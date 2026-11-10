@@ -69,6 +69,7 @@
     <header class="glass bar">
       <h2 id="title">總覽</h2>
       <div class="actions">
+        <button class="peer-chip" id="peer-chip" type="button" hidden aria-live="polite"><i></i><span></span></button>
         <button class="icon desk-only" id="phone-btn" title="手機連線" aria-label="手機連線" hidden>
           <svg viewBox="0 0 24 24" width="17" height="17"><rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M11 18.5h2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>
         </button>
@@ -396,6 +397,20 @@
       <button type="button" data-s="0">關閉</button><button type="button" data-s="15">15 秒</button><button type="button" data-s="30">30 秒</button><button type="button" data-s="60">1 分</button><button type="button" data-s="300">5 分</button><button type="button" data-s="900">15 分</button>
     </div>
     <p class="hint">報價與匯率會同時抓取，間隔越短越即時；視窗隱藏或正在編輯時會自動暫停。</p>
+
+    <div class="peer-only" hidden>
+      <h4>裝置同步</h4>
+      <p class="hint" id="peer-text"></p>
+      <div class="droid-only" id="peer-unbound" hidden>
+        <label>電腦位址或連結<input id="peer-link" placeholder="例如 192.168.1.5:8787，或貼上手機連線的網址" autocomplete="off" inputmode="url"></label>
+        <label>PIN<input id="peer-pin" inputmode="numeric" autocomplete="off" placeholder="電腦「手機連線」裡的 PIN；貼上連結時可留空"></label>
+        <div class="btns"><button type="button" id="peer-bind" class="primary">綁定並同步</button></div>
+      </div>
+      <div id="peer-bound" hidden>
+        <div class="btns"><button type="button" id="peer-now">立即同步</button><button type="button" id="peer-off" class="danger">解除綁定</button></div>
+      </div>
+      <p class="hint" id="peer-status"></p>
+    </div>
 
     <h4>匯率（1 單位折合 TWD）</h4>
     <div id="rates"></div>

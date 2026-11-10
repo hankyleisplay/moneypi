@@ -17,6 +17,8 @@ const store = {
 
 /* ---------- backend access: Tauri IPC on the desktop, HTTP+PIN from a LAN browser ---------- */
 const inTauri = !!(window.__TAURI__ && window.__TAURI__.core);
+const isAndroid = inTauri && /Android/i.test(navigator.userAgent); // the phone app: same UI, own data, syncs with the computer
+document.documentElement.classList.toggle("android", isAndroid);
 let token = store.get("token", "");
 if (!inTauri && location.hash.startsWith("#pin=")) {
   token = decodeURIComponent(location.hash.slice(5));
@@ -24,8 +26,14 @@ if (!inTauri && location.hash.startsWith("#pin=")) {
   history.replaceState(null, "", location.pathname);
 }
 
+// commands that change the data: after one of them, a sync with the bound device is scheduled
+const MUTATING = new Set(["save_asset", "delete_asset", "add_tx", "delete_tx", "save_goal", "delete_goal", "add_flow", "delete_flow", "save_plan", "delete_plan", "import_csv", "import_backup", "import_history", "import_tracker", "set_settings"]);
 async function invoke(cmd, args = {}) {
-  if (inTauri) return window.__TAURI__.core.invoke("call", { cmd, args });
+  if (inTauri) {
+    const r = await window.__TAURI__.core.invoke("call", { cmd, args });
+    if (MUTATING.has(cmd)) schedulePeerSync();
+    return r;
+  }
   for (;;) {
     let r;
     try {
@@ -1545,6 +1553,7 @@ $("refresh-seg").onclick = (e) => {
 
 async function openSettings() {
   setRefreshSeg(data.refresh_sec || 0);
+  refreshPeer();
   $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
   $("new-code").value = $("new-rate").value = "";
   $("serr").textContent = "";
@@ -2267,8 +2276,77 @@ document.addEventListener("input", (e) => {
   (e.target.closest("label") || e.target.parentElement).querySelector(".field-err")?.remove();
 });
 
+/* ---------- device sync (phone app <-> computer) ---------- */
+// Each device keeps its own data. When the app starts, comes back to the front or something was edited, it looks for
+// the bound device; if that one is on, both sides exchange changes and end up identical. If not, nothing is lost.
+let peer = { bound: false }, peerBusy = false, peerTimer = 0, peerLast = 0, peerErr = ""; // peerErr: why binding just failed
+const hhmm = (ms) => new Date(ms).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false });
+function renderPeer() {
+  const chip = $("peer-chip"), st = peer.state || "";
+  chip.hidden = !inTauri || !peer.bound;
+  chip.className = "peer-chip " + (peerBusy ? "syncing" : st);
+  const label = peerBusy || st === "syncing" ? "同步中…" : st === "ok" ? `已同步 ${hhmm(peer.at || Date.now())}`
+    : st === "offline" ? `${peer.name || "對方"}未連線` : st === "denied" || st === "error" ? "同步失敗" : peer.last_sync ? `上次同步 ${hhmm(peer.last_sync)}` : "尚未同步";
+  chip.lastElementChild.textContent = label;
+  chip.title = peer.message || `與「${peer.name || ""}」同步：點一下立即同步`;
+  $("peer-text").textContent = peer.bound
+    ? `已綁定：${peer.name || "另一台裝置"}（${peer.url}）。每次開啟 App、回到畫面或修改資料時會自動同步；對方沒開機時，資料先留在這台，之後再同步。`
+    : isAndroid ? "輸入電腦「手機連線」裡的位址與 PIN 後綁定。資料會同時保存在這支手機，沒連上電腦也能照常記帳，連上後自動合併。"
+    : "尚未綁定。請在手機 App 的「設定 → 裝置同步」輸入「手機連線」裡顯示的位址與 PIN，綁定後兩邊會自動同步。";
+  $("peer-unbound").hidden = !isAndroid || peer.bound;
+  $("peer-bound").hidden = !peer.bound;
+  const bad = st === "denied" || st === "error" || st === "offline";
+  $("peer-status").textContent = peerErr || (peer.bound && bad ? peer.message : "");
+  $("peer-status").classList.toggle("err", !!peerErr || st === "denied" || st === "error");
+}
+async function refreshPeer() {
+  if (!inTauri) return;
+  try { peer = await invoke("peer_info"); } catch {}
+  renderPeer();
+}
+async function syncPeer(manual) {
+  if (!inTauri || !peer.bound || peerBusy) return;
+  peerBusy = true; peerLast = Date.now(); renderPeer();
+  try {
+    peer = await invoke("sync_peer");
+    if (manual) toast(peer.state === "ok" ? "已同步" : peer.message || "同步失敗");
+  } catch (err) {
+    if (manual) toast("同步失敗：" + err);
+  } finally {
+    peerBusy = false; renderPeer();
+  }
+}
+function schedulePeerSync() {
+  if (!peer.bound) return;
+  if (peer.state === "offline" && Date.now() - (peer.at || 0) < 60000) return; // do not keep knocking on a closed door
+  clearTimeout(peerTimer);
+  peerTimer = setTimeout(() => syncPeer(false), 4000);
+}
+if (inTauri) {
+  $("peer-chip").onclick = () => syncPeer(true);
+  $("peer-now").onclick = () => syncPeer(true);
+  $("peer-bind").onclick = async () => {
+    const btn = $("peer-bind");
+    btn.disabled = true; peerErr = ""; $("peer-status").classList.remove("err"); $("peer-status").textContent = "連線中…";
+    try {
+      peer = await invoke("pair_peer", { link: $("peer-link").value, pin: $("peer-pin").value });
+      $("peer-link").value = $("peer-pin").value = "";
+      toast(`已綁定「${peer.name}」並完成同步`);
+    } catch (err) {
+      peerErr = String(err);
+    } finally { btn.disabled = false; renderPeer(); }
+  };
+  $("peer-off").onclick = async () => {
+    if (!(await confirmBox("解除綁定這台裝置？", "兩邊目前的資料都會保留，只是不再自動同步。", "解除綁定"))) return;
+    peer = await invoke("unpair_peer"); renderPeer(); toast("已解除綁定");
+  };
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() - peerLast > 20000) syncPeer(false); });
+  setInterval(() => { if (!document.hidden) syncPeer(false); }, 5 * 60000);
+}
+
 /* ---------- boot ---------- */
-document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !inTauri));
+document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !(inTauri && !isAndroid)));
+document.querySelectorAll(".peer-only").forEach((el) => (el.hidden = !inTauri));
 // Launch splash: shown while the app loads, at least 0.9 s so the animation reads, then fades out.
 function hideSplash() {
   const sp = $("splash");
@@ -2289,6 +2367,7 @@ async function boot() {
   data = await invoke("get_data");
   render();
   hideSplash();
+  refreshPeer().then(() => syncPeer(false)); // on every start: is the bound device on? then sync
   scheduleRefresh();
   if (inTauri && data.refresh_sec > 0) doRefresh(false);
   runPlans(false).then(() => runDividends(false));
