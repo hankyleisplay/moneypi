@@ -924,7 +924,7 @@ $("trend").addEventListener("keydown", (e) => {
 });
 
 function renderInvestmentIdeas() {
-  const risk = ddInvestRisk.value;
+  const risk = ["steady", "balanced", "growth"].includes(ddInvestRisk.value) ? ddInvestRisk.value : "balanced"; // a bad saved value must not break the page
   const assets = data.assets.filter(a => !a.liability && toBase(a) > 0);
   const total = sum(assets), stocks = assets.filter(a => a.category === "股票" || a.category === "基金/ETF");
   const biggest = [...stocks].sort((a,b) => toBase(b) - toBase(a))[0];
