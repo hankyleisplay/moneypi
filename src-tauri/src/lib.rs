@@ -223,6 +223,25 @@ struct Data {
     backup_dir: String,
     #[serde(default = "default_keep")]
     backup_keep: u32,
+    /// Identity of this device in a sync pair: 0 for the original (desktop) data file, a random number on a phone.
+    /// It is the high part of every id created here, so two devices can add records offline without id clashes.
+    #[serde(default)]
+    device: u32,
+    /// Only the primary device books recurring plans and dividends; the others receive the result through sync.
+    #[serde(default = "yes")]
+    primary: bool,
+    /// Change stamps per record ("a:12", "g:3", "f:7", "p:2"), used to merge two devices. Deleted records stay as tombstones.
+    #[serde(default)]
+    stamps: BTreeMap<String, Stamp>,
+}
+
+/// When a record last changed (ms since epoch), a hash of its user-editable content, and whether it was deleted.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+struct Stamp {
+    h: u64,
+    at: u64,
+    #[serde(default)]
+    del: bool,
 }
 
 fn default_keep() -> u32 {
@@ -252,6 +271,9 @@ impl Default for Data {
             backup_on: false,
             backup_dir: String::new(),
             backup_keep: default_keep(),
+            device: 0,
+            primary: true,
+            stamps: BTreeMap::new(),
         }
     }
 }
@@ -278,6 +300,181 @@ fn net_history(d: &Data) -> Vec<GoalPoint> {
 }
 
 /// Move the legacy single goal into the goals list.
+/// Next id for a new record created on this device: the device number in the high bits, a counter in the low 32.
+/// Device 0 (the desktop's original file) therefore keeps plain 1, 2, 3 ids. All ids stay below 2^53 so JavaScript is exact.
+fn next_record_id(counter: &mut u64, device: u32) -> u64 {
+    *counter += 1;
+    ((device as u64 & 0xFFFF) << 32) | (*counter & 0xFFFF_FFFF)
+}
+
+/// Where this device's counter must start after ids were loaded from elsewhere (a restored backup).
+fn counter_floor(ids: impl Iterator<Item = u64>, device: u32, current: u64) -> u64 {
+    ids.filter(|id| (id >> 32) as u32 == device & 0xFFFF).map(|id| id & 0xFFFF_FFFF).max().unwrap_or(0).max(current)
+}
+
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+/// Stable (version independent) 64-bit FNV-1a hash.
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// What counts as the user's own edit of an asset: not the quote refresh (price, time, value) or the bookkeeping date.
+fn asset_digest(a: &Asset) -> u64 {
+    let mut a = a.clone();
+    a.updated.clear();
+    if !a.market.is_empty() {
+        a.price = 0.0;
+        a.price_updated.clear();
+        a.value = 0.0;
+    }
+    fnv(&serde_json::to_vec(&a).unwrap_or_default())
+}
+
+fn goal_digest(g: &Goal) -> u64 {
+    let mut g = g.clone();
+    g.history.clear(); // derived every day
+    fnv(&serde_json::to_vec(&g).unwrap_or_default())
+}
+
+fn json_digest<T: Serialize>(x: &T) -> u64 {
+    fnv(&serde_json::to_vec(x).unwrap_or_default())
+}
+
+/// Bring the change stamps up to date: records whose content changed get `now`, new ones get `now`, records that
+/// disappeared become tombstones stamped `now`. Called on every write, so `at` is the real time of the edit.
+fn stamp(d: &mut Data, now: u64) {
+    let mut live: BTreeMap<String, u64> = BTreeMap::new();
+    for a in &d.assets {
+        live.insert(format!("a:{}", a.id), asset_digest(a));
+    }
+    for g in &d.goals {
+        live.insert(format!("g:{}", g.id), goal_digest(g));
+    }
+    for f in &d.cashflow {
+        live.insert(format!("f:{}", f.id), json_digest(f));
+    }
+    for p in &d.plans {
+        live.insert(format!("p:{}", p.id), json_digest(p));
+    }
+    for (k, h) in &live {
+        match d.stamps.get(k) {
+            Some(s) if !s.del && s.h == *h => {}
+            _ => {
+                d.stamps.insert(k.clone(), Stamp { h: *h, at: now, del: false });
+            }
+        }
+    }
+    for (k, s) in d.stamps.iter_mut() {
+        if !s.del && !live.contains_key(k) {
+            *s = Stamp { h: 0, at: now, del: true };
+        }
+    }
+}
+
+/// The part of the data that two paired devices exchange. Device settings (PIN, port, backup folder…) stay local.
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct SyncPayload {
+    #[serde(default)]
+    assets: Vec<Asset>,
+    #[serde(default)]
+    goals: Vec<Goal>,
+    #[serde(default)]
+    cashflow: Vec<Flow>,
+    #[serde(default)]
+    plans: Vec<Plan>,
+    #[serde(default)]
+    snapshots: Vec<Snapshot>,
+    #[serde(default)]
+    rates: BTreeMap<String, f64>,
+    #[serde(default)]
+    stamps: BTreeMap<String, Stamp>,
+}
+
+fn sync_payload(d: &Data) -> SyncPayload {
+    SyncPayload {
+        assets: d.assets.clone(),
+        goals: d.goals.clone(),
+        cashflow: d.cashflow.clone(),
+        plans: d.plans.clone(),
+        snapshots: d.snapshots.clone(),
+        rates: d.rates.clone(),
+        stamps: d.stamps.clone(),
+    }
+}
+
+/// Merge one record collection: for every key either side knows, the newer stamp wins (equal time: the larger hash,
+/// so both devices pick the same one). A newer tombstone deletes the record.
+fn merge_records<T: Clone>(local: &mut Vec<T>, remote: &[T], id_of: fn(&T) -> u64, prefix: &str, ls: &mut BTreeMap<String, Stamp>, rs: &BTreeMap<String, Stamp>) {
+    let keys: std::collections::BTreeSet<String> = ls.keys().chain(rs.keys()).filter(|k| k.starts_with(prefix)).cloned().collect();
+    for k in keys {
+        let Some(r) = rs.get(&k) else { continue };
+        if let Some(l) = ls.get(&k) {
+            if (r.at, r.h) <= (l.at, l.h) {
+                continue;
+            }
+        }
+        let id: u64 = k[prefix.len()..].parse().unwrap_or(0);
+        if r.del {
+            local.retain(|x| id_of(x) != id);
+        } else if let Some(rec) = remote.iter().find(|x| id_of(x) == id) {
+            match local.iter().position(|x| id_of(x) == id) {
+                Some(i) => local[i] = rec.clone(),
+                None => local.push(rec.clone()),
+            }
+        } else {
+            continue; // the stamp says "live" but the record is missing: ignore rather than lose data
+        }
+        ls.insert(k, r.clone());
+    }
+}
+
+/// Merge what another device sent into this one. Returns how many records changed here.
+fn merge_payload(d: &mut Data, remote: &SyncPayload, now: u64) -> usize {
+    stamp(d, now); // make sure our own edits are stamped before comparing
+    let mut remote = remote.clone();
+    if remote.stamps.is_empty() {
+        // a peer without stamps (older version): its records count as old, ours win
+        let mut tmp = Data { assets: remote.assets.clone(), goals: remote.goals.clone(), cashflow: remote.cashflow.clone(), plans: remote.plans.clone(), ..Default::default() };
+        stamp(&mut tmp, 0);
+        remote.stamps = tmp.stamps;
+    }
+    let before = d.stamps.clone();
+    let mut stamps = std::mem::take(&mut d.stamps);
+    merge_records(&mut d.assets, &remote.assets, |a| a.id, "a:", &mut stamps, &remote.stamps);
+    merge_records(&mut d.goals, &remote.goals, |g| g.id, "g:", &mut stamps, &remote.stamps);
+    merge_records(&mut d.cashflow, &remote.cashflow, |f| f.id, "f:", &mut stamps, &remote.stamps);
+    merge_records(&mut d.plans, &remote.plans, |p| p.id, "p:", &mut stamps, &remote.stamps);
+    d.stamps = stamps;
+    let changed = d.stamps.iter().filter(|(k, v)| before.get(*k) != Some(*v)).count();
+    add_missing_snapshots(&mut d.snapshots, remote.snapshots.clone(), "9999-12-31");
+    for (c, r) in &remote.rates {
+        d.rates.entry(c.clone()).or_insert(*r);
+    }
+    // references that now point at records another device deleted
+    let ids: std::collections::HashSet<u64> = d.assets.iter().map(|a| a.id).collect();
+    for g in d.goals.iter_mut() {
+        g.assets.retain(|id| ids.contains(id));
+    }
+    d.plans.retain(|p| ids.contains(&p.asset));
+    for p in d.plans.iter_mut() {
+        if p.cash != 0 && !ids.contains(&p.cash) {
+            p.cash = 0;
+        }
+    }
+    for a in d.assets.iter_mut() {
+        for t in a.txs.iter_mut() {
+            if t.cash != 0 && !ids.contains(&t.cash) {
+                t.cash = 0;
+            }
+        }
+        recompute(a);
+    }
+    changed
+}
+
 fn migrate(d: &mut Data) {
     if d.goals.is_empty() && d.goal > 0.0 {
         d.next_goal += 1;
@@ -299,6 +496,9 @@ fn migrate(d: &mut Data) {
             d.refresh_sec = d.refresh_min * 60;
         }
         d.refresh_min = 0;
+    }
+    if d.stamps.is_empty() {
+        stamp(d, 0); // records that existed before sync support count as old
     }
 }
 
@@ -323,6 +523,7 @@ fn view(d: &Data) -> Value {
     let mut v = serde_json::to_value(d).unwrap_or(Value::Null);
     if let Some(o) = v.as_object_mut() {
         o.remove("sync_pin");
+        o.remove("stamps");
     }
     v
 }
@@ -890,7 +1091,10 @@ impl Core {
         }
     }
 
-    fn persist(&self, d: &Data) -> Result<(), String> {
+    fn persist(&self, d: &mut Data) -> Result<(), String> {
+        if !self.is_locked() {
+            stamp(d, now_ms());
+        }
         let json = serde_json::to_string_pretty(d).map_err(|e| e.to_string())?;
         let out = {
             let e = self.enc.lock().unwrap();
@@ -949,8 +1153,8 @@ impl Core {
             return Err("尚未設定密碼".into());
         }
         {
-            let d = self.data.lock().unwrap();
-            self.persist(&d)?;
+            let mut d = self.data.lock().unwrap();
+            self.persist(&mut d)?;
         }
         self.tunnel_stop();
         self.stop_server();
@@ -962,7 +1166,7 @@ impl Core {
 
     /// Turn the password on, change it, or (empty `new`) turn it off. `old` is required once a password exists.
     fn set_password(&self, old: &str, new: &str) -> Result<Value, String> {
-        let d = self.data.lock().unwrap();
+        let mut d = self.data.lock().unwrap();
         {
             let e = self.enc.lock().unwrap();
             if e.encrypted {
@@ -989,7 +1193,7 @@ impl Core {
             let key = kdf(new, &salt)?;
             *self.enc.lock().unwrap() = EncState { encrypted: true, key: Some(key), salt: salt.to_vec() };
         }
-        self.persist(&d)?;
+        self.persist(&mut d)?;
         Ok(self.lock_status())
     }
 
@@ -1016,7 +1220,7 @@ impl Core {
             d.backup_on = on;
             d.backup_dir = dir.to_string();
             d.backup_keep = keep;
-            self.persist(&d)?;
+            self.persist(&mut d)?;
         }
         if on {
             self.auto_backup(false)?;
@@ -1043,8 +1247,8 @@ impl Core {
             return Ok(None);
         }
         if !self.path.exists() {
-            let d = self.data.lock().unwrap();
-            self.persist(&d)?;
+            let mut d = self.data.lock().unwrap();
+            self.persist(&mut d)?;
         }
         fs::copy(&self.path, &target).map_err(|e| format!("備份失敗：{e}"))?;
         let mut files = backup_files(&dir);
@@ -1098,8 +1302,8 @@ impl Core {
             if d.goals.len() >= 50 {
                 return Err("目標數量已達上限（50）".into());
             }
-            d.next_goal += 1;
-            g.id = d.next_goal;
+            let dev = d.device;
+            g.id = next_record_id(&mut d.next_goal, dev);
             g.history = if g.assets.is_empty() { net_history(&d) } else { vec![] };
             d.goals.push(g);
         } else {
@@ -1121,7 +1325,7 @@ impl Core {
     fn delete_goal(&self, id: u64) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
         d.goals.retain(|g| g.id != id);
-        self.persist(&d)?;
+        self.persist(&mut d)?;
         Ok(view(&d))
     }
 
@@ -1130,17 +1334,17 @@ impl Core {
         f.note = f.note.trim().to_string();
         validate_flow(&f)?;
         let mut d = self.data.lock().unwrap();
-        d.next_flow += 1;
-        f.id = d.next_flow;
+        let dev = d.device;
+        f.id = next_record_id(&mut d.next_flow, dev);
         d.cashflow.push(f);
-        self.persist(&d)?;
+        self.persist(&mut d)?;
         Ok(view(&d))
     }
 
     fn delete_flow(&self, id: u64) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
         d.cashflow.retain(|f| f.id != id);
-        self.persist(&d)?;
+        self.persist(&mut d)?;
         Ok(view(&d))
     }
 
@@ -1178,9 +1382,13 @@ impl Core {
         inc.backup_on = d.backup_on;
         inc.backup_dir = d.backup_dir.clone();
         inc.backup_keep = d.backup_keep;
-        inc.next_id = inc.next_id.max(inc.assets.iter().map(|a| a.id).max().unwrap_or(0));
-        inc.next_flow = inc.next_flow.max(inc.cashflow.iter().map(|f| f.id).max().unwrap_or(0));
-        inc.next_goal = inc.next_goal.max(inc.goals.iter().map(|g| g.id).max().unwrap_or(0));
+        inc.device = d.device;
+        inc.primary = d.primary;
+        inc.stamps = d.stamps.clone(); // changed / removed records get new stamps on the commit below
+        inc.next_id = counter_floor(inc.assets.iter().map(|a| a.id), inc.device, inc.next_id);
+        inc.next_flow = counter_floor(inc.cashflow.iter().map(|f| f.id), inc.device, inc.next_flow);
+        inc.next_goal = counter_floor(inc.goals.iter().map(|g| g.id), inc.device, inc.next_goal);
+        inc.next_plan = counter_floor(inc.plans.iter().map(|p| p.id), inc.device, inc.next_plan);
         let _ = fs::copy(&self.path, self.path.with_extension("before-restore.json"));
         for a in inc.assets.iter_mut() {
             recompute(a);
@@ -1214,8 +1422,8 @@ impl Core {
         }
         recompute(&mut asset);
         if asset.id == 0 {
-            d.next_id += 1;
-            asset.id = d.next_id;
+            let dev = d.device;
+            asset.id = next_record_id(&mut d.next_id, dev);
             d.assets.push(asset);
         } else if let Some(slot) = d.assets.iter_mut().find(|a| a.id == asset.id) {
             *slot = asset;
@@ -1238,6 +1446,9 @@ impl Core {
     /// Add the dividends the quote source reports for every holding with automatic dividends on.
     fn run_dividends(&self) -> Result<Value, String> {
         let _guard = self.plan_lock.lock().unwrap();
+        if !self.data.lock().unwrap().primary {
+            return Ok(json!({ "added": 0, "failed": Vec::<String>::new(), "data": view(&self.data.lock().unwrap()) }));
+        }
         let today_s = today();
         let targets: Vec<(u64, String, String, String)> = {
             let d = self.data.lock().unwrap();
@@ -1308,7 +1519,7 @@ impl Core {
                 if let Some(a) = d.assets.iter_mut().find(|a| a.id == id) {
                     a.div_seen.extend(handled);
                 }
-                let _ = self.persist(&d);
+                let _ = self.persist(&mut d);
             }
         }
         Ok(json!({ "added": added, "failed": failed, "data": view(&self.data.lock().unwrap()) }))
@@ -1344,22 +1555,22 @@ impl Core {
         p.status.clear();
         if p.id == 0 {
             p.last.clear();
-            d.next_plan += 1;
-            p.id = d.next_plan;
+            let dev = d.device;
+            p.id = next_record_id(&mut d.next_plan, dev);
             d.plans.push(p);
         } else {
             let slot = d.plans.iter_mut().find(|x| x.id == p.id).ok_or("找不到這個定期定額")?;
             p.last = slot.last.clone();
             *slot = p;
         }
-        self.persist(&d)?;
+        self.persist(&mut d)?;
         Ok(view(&d))
     }
 
     fn delete_plan(&self, id: u64) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
         d.plans.retain(|p| p.id != id);
-        self.persist(&d)?;
+        self.persist(&mut d)?;
         Ok(view(&d))
     }
 
@@ -1371,13 +1582,16 @@ impl Core {
             }
             p.status = status.to_string();
         }
-        let _ = self.persist(&d);
+        let _ = self.persist(&mut d);
     }
 
     /// Book every plan period that has come due since the last run (also backfills past periods).
     /// Prices are the first close on or after the scheduled day, so the date is the real trading day.
     fn run_plans(&self) -> Result<Value, String> {
         let _guard = self.plan_lock.lock().unwrap();
+        if !self.data.lock().unwrap().primary {
+            return Ok(json!({ "added": 0, "failed": Vec::<String>::new(), "data": view(&self.data.lock().unwrap()) }));
+        }
         let today_d = chrono::Local::now().date_naive();
         let today_s = today_d.format("%Y-%m-%d").to_string();
         let plans: Vec<Plan> = self.data.lock().unwrap().plans.clone();
@@ -1658,6 +1872,16 @@ impl Core {
         out
     }
 
+    /// Merge what a paired device sent, and answer with this device's merged state so the caller can merge it back.
+    /// Both sides then hold the same records.
+    fn sync(&self, remote: SyncPayload) -> Result<Value, String> {
+        let _guard = self.plan_lock.lock().unwrap(); // never in the middle of booking plans
+        let mut d = self.data.lock().unwrap();
+        let changed = merge_payload(&mut d, &remote, now_ms());
+        self.commit(&mut d)?;
+        Ok(json!({ "changed": changed, "payload": sync_payload(&d), "data": view(&d) }))
+    }
+
     /// Import holdings (with their transactions) and daily totals from an "Asset Tracker" JSON backup.
     /// Holdings that already exist (same ticker or name) are left alone; existing snapshot days are kept.
     fn import_tracker(&self, text: &str) -> Result<Value, String> {
@@ -1673,8 +1897,8 @@ impl Core {
             validate_asset(&a, &d).map_err(|e| format!("{}：{}", a.name, e))?;
             a.updated = today();
             recompute(&mut a);
-            d.next_id += 1;
-            a.id = d.next_id;
+            let dev = d.device;
+            a.id = next_record_id(&mut d.next_id, dev);
             added.push(a.name.clone());
             d.assets.push(a);
         }
@@ -1690,7 +1914,7 @@ impl Core {
         let mut d = self.data.lock().unwrap();
         let (added, skipped) = merge_history(&mut d.snapshots, text, &today())?;
         if added > 0 {
-            self.persist(&d)?;
+            self.persist(&mut d)?;
         }
         Ok(json!({ "data": view(&d), "added": added, "skipped": skipped }))
     }
@@ -1733,8 +1957,8 @@ impl Core {
             return Err("檔案中沒有可匯入的資料".into());
         }
         for mut a in added {
-            d.next_id += 1;
-            a.id = d.next_id;
+            let dev = d.device;
+            a.id = next_record_id(&mut d.next_id, dev);
             d.assets.push(a);
         }
         self.commit(&mut d)?;
@@ -2324,6 +2548,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "delete_goal" => core.delete_goal(arg(&args, "id")?),
         "refresh_quotes" => core.refresh_quotes(),
         "export_csv" => Ok(Value::String(core.export_csv())),
+        "sync" => core.sync(serde_json::from_value(args["payload"].clone()).map_err(|e| format!("同步資料格式錯誤：{e}"))?),
         "import_tracker" => core.import_tracker(&arg::<String>(&args, "text")?),
         "import_history" => core.import_history(&arg::<String>(&args, "text")?),
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
@@ -2700,8 +2925,8 @@ mod tests {
         let c2 = core.clone();
         thread::spawn(move || {
             thread::sleep(Duration::from_millis(300));
-            let d = c2.data.lock().unwrap();
-            c2.persist(&d).unwrap();
+            let mut d = c2.data.lock().unwrap();
+            c2.persist(&mut d).unwrap();
         });
         let t = Instant::now();
         let r1 = core.wait_rev(r0)["rev"].as_i64().unwrap();
@@ -2760,6 +2985,198 @@ mod tests {
         println!("assets={} snapshots={} total value={:.2} total cost={:.2}", d.assets.len(), d.snapshots.len(), value, cost);
         assert!(d.assets.iter().all(|a| a.holding && a.quantity > 0.0 && a.value > 0.0));
     }
+
+    // ------------------------------------------------------------- two-device sync
+
+    fn pair() -> (Arc<Core>, Arc<Core>) {
+        let (a, b) = (Arc::new(temp_core("syncA")), Arc::new(temp_core("syncB")));
+        {
+            let mut d = b.data.lock().unwrap();
+            d.device = 7;
+            d.primary = false;
+        }
+        (a, b)
+    }
+    fn save(c: &Arc<Core>, v: Value) -> Value {
+        dispatch(c, "save_asset", json!({ "asset": v }), false).unwrap()
+    }
+    /// What the real exchange does: A sends to B, B answers with its merged state, A merges that back.
+    fn exchange(a: &Arc<Core>, b: &Arc<Core>) -> (u64, u64) {
+        let pa = sync_payload(&a.data.lock().unwrap());
+        let rb = b.sync(pa).unwrap();
+        let back: SyncPayload = serde_json::from_value(rb["payload"].clone()).unwrap();
+        let ra = a.sync(back).unwrap();
+        (rb["changed"].as_u64().unwrap(), ra["changed"].as_u64().unwrap())
+    }
+    fn names(c: &Arc<Core>) -> Vec<String> {
+        let mut v: Vec<String> = c.data.lock().unwrap().assets.iter().map(|a| a.name.clone()).collect();
+        v.sort();
+        v
+    }
+    fn cash(name: &str, value: f64) -> Value {
+        json!({ "name": name, "category": "銀行存款", "currency": "TWD", "value": value })
+    }
+    fn pause() {
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    #[test]
+    fn devices_add_offline_without_id_clashes_and_converge() {
+        let (pc, phone) = pair();
+        save(&pc, cash("電腦存款", 100.0));
+        save(&phone, cash("手機現金", 50.0));
+        let (id_pc, id_phone) = (pc.data.lock().unwrap().assets[0].id, phone.data.lock().unwrap().assets[0].id);
+        assert_eq!(id_pc, 1, "the desktop keeps plain ids");
+        assert_eq!(id_phone, (7u64 << 32) | 1);
+        assert!(id_phone < (1u64 << 53), "must stay exact in JavaScript");
+        let (c1, c2) = exchange(&pc, &phone);
+        assert!(c1 > 0 && c2 > 0);
+        assert_eq!(names(&pc), ["手機現金", "電腦存款"]);
+        assert_eq!(names(&phone), names(&pc));
+        assert_eq!(exchange(&pc, &phone), (0, 0), "a second round changes nothing");
+        // both keep creating without clashes afterwards
+        save(&pc, cash("電腦 2", 1.0));
+        save(&phone, cash("手機 2", 1.0));
+        exchange(&pc, &phone);
+        let ids: std::collections::HashSet<u64> = pc.data.lock().unwrap().assets.iter().map(|a| a.id).collect();
+        assert_eq!((ids.len(), names(&pc).len(), names(&phone)), (4, 4, names(&pc)));
+    }
+
+    #[test]
+    fn the_later_edit_wins_and_quote_refreshes_do_not_count_as_edits() {
+        let (pc, phone) = pair();
+        save(&pc, cash("存款", 100.0));
+        exchange(&pc, &phone);
+        let id = pc.data.lock().unwrap().assets[0].id;
+        // PC edits first, the phone edits the same record later: the phone's edit wins everywhere
+        let mut v = serde_json::to_value(&pc.data.lock().unwrap().assets[0]).unwrap();
+        v["value"] = json!(111.0);
+        save(&pc, v);
+        pause();
+        let mut v = serde_json::to_value(&phone.data.lock().unwrap().assets[0]).unwrap();
+        v["value"] = json!(222.0);
+        save(&phone, v);
+        exchange(&pc, &phone);
+        for c in [&pc, &phone] {
+            assert_eq!(c.data.lock().unwrap().assets.iter().find(|a| a.id == id).unwrap().value, 222.0);
+        }
+        // a price refresh of a quoted holding (market set) must not look like an edit
+        let mut h = cash("台積電", 0.0);
+        h["holding"] = json!(true);
+        h["market"] = json!("tw");
+        h["symbol"] = json!("2330");
+        h["quantity"] = json!(1.0);
+        h["price"] = json!(500.0);
+        save(&pc, h);
+        let hid = pc.data.lock().unwrap().assets.iter().find(|a| a.name == "台積電").unwrap().id;
+        let before = pc.data.lock().unwrap().stamps[&format!("a:{hid}")].clone();
+        pause();
+        {
+            let mut d = pc.data.lock().unwrap();
+            let a = d.assets.iter_mut().find(|a| a.id == hid).unwrap();
+            a.price = 999.0;
+            a.price_updated = "2026-11-10 13:30".into();
+            recompute(a);
+            pc.persist(&mut d).unwrap();
+        }
+        assert_eq!(pc.data.lock().unwrap().stamps[&format!("a:{hid}")], before);
+    }
+
+    #[test]
+    fn deletes_travel_and_a_newer_edit_beats_an_older_delete() {
+        let (pc, phone) = pair();
+        save(&pc, cash("要刪除", 1.0));
+        save(&pc, cash("要修改", 1.0));
+        exchange(&pc, &phone);
+        let (del_id, keep_id) = {
+            let d = pc.data.lock().unwrap();
+            (d.assets.iter().find(|a| a.name == "要刪除").unwrap().id, d.assets.iter().find(|a| a.name == "要修改").unwrap().id)
+        };
+        dispatch(&phone, "delete_asset", json!({ "id": del_id }), false).unwrap();
+        pause();
+        dispatch(&phone, "delete_asset", json!({ "id": keep_id }), false).unwrap(); // phone deletes it...
+        pause();
+        let mut v = serde_json::to_value(pc.data.lock().unwrap().assets.iter().find(|a| a.id == keep_id).unwrap()).unwrap();
+        v["value"] = json!(5.0);
+        save(&pc, v); // ...but the PC edits it afterwards
+        exchange(&pc, &phone);
+        assert_eq!(names(&pc), ["要修改"]);
+        assert_eq!(names(&phone), ["要修改"]);
+        assert_eq!(phone.data.lock().unwrap().assets[0].value, 5.0);
+    }
+
+    #[test]
+    fn goals_flows_plans_and_history_sync_and_dangling_references_are_cleaned() {
+        let (pc, phone) = pair();
+        save(&pc, cash("存款", 100.0));
+        exchange(&pc, &phone);
+        let aid = pc.data.lock().unwrap().assets[0].id;
+        dispatch(&phone, "save_goal", json!({ "goal": { "name": "旅行", "amount": 1000.0, "assets": [aid] } }), false).unwrap();
+        dispatch(&phone, "add_flow", json!({ "flow": { "date": "2026-11-09", "kind": "out", "category": "餐飲", "amount": 80.0 } }), false).unwrap();
+        pc.data.lock().unwrap().snapshots.push(Snapshot { date: "2026-10-01".into(), assets: 10.0, liabilities: 0.0 });
+        exchange(&pc, &phone);
+        {
+            let d = pc.data.lock().unwrap();
+            assert_eq!((d.goals.len(), d.cashflow.len()), (1, 1));
+        }
+        assert!(phone.data.lock().unwrap().snapshots.iter().any(|s| s.date == "2026-10-01"));
+        // the PC deletes the asset: the goal that pointed at it must not keep a dangling id on either side
+        dispatch(&pc, "delete_asset", json!({ "id": aid }), false).unwrap();
+        pause();
+        exchange(&pc, &phone);
+        assert!(phone.data.lock().unwrap().goals[0].assets.is_empty());
+        assert!(phone.data.lock().unwrap().assets.is_empty());
+    }
+
+    #[test]
+    fn only_the_primary_device_books_plans_and_dividends() {
+        let (_pc, phone) = pair();
+        let r = dispatch(&phone, "run_plans", json!({}), false).unwrap();
+        assert_eq!(r["added"], 0);
+        let r = dispatch(&phone, "run_dividends", json!({}), false).unwrap();
+        assert_eq!(r["added"], 0);
+    }
+
+    #[test]
+    fn data_from_before_sync_support_counts_as_old_and_keeps_its_ids() {
+        let mut d: Data = serde_json::from_str(r#"{"next_id":2,"assets":[{"id":1,"name":"舊存款","category":"銀行存款","currency":"TWD","value":5.0},{"id":2,"name":"舊現金","category":"現金","currency":"TWD","value":6.0}],"snapshots":[]}"#).unwrap();
+        migrate(&mut d);
+        assert_eq!(d.stamps.len(), 2);
+        assert!(d.stamps.values().all(|s| s.at == 0 && !s.del));
+        assert_eq!((d.device, d.primary), (0, true));
+        assert_eq!(d.assets.iter().map(|a| a.id).collect::<Vec<_>>(), [1, 2]);
+        // a peer edit made after the upgrade beats the untouched old record
+        let mut remote = sync_payload(&d);
+        remote.assets[0].value = 9.0;
+        remote.stamps.insert("a:1".into(), Stamp { h: 123, at: 5, del: false });
+        merge_payload(&mut d, &remote, 10);
+        assert_eq!(d.assets[0].value, 9.0);
+        // a payload without stamps (older peer) never overrides
+        let mut old = sync_payload(&d);
+        old.stamps.clear();
+        old.assets[1].value = 1.0;
+        merge_payload(&mut d, &old, 20);
+        assert_eq!(d.assets[1].value, 6.0);
+    }
+
+    /// Real export on the "phone": `MONEYPI_TRACKER=backup.json cargo test real_files_sync -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs MONEYPI_TRACKER"]
+    fn real_files_sync_to_an_empty_phone() {
+        let (pc, phone) = pair();
+        let text = std::fs::read_to_string(std::env::var("MONEYPI_TRACKER").unwrap()).unwrap();
+        dispatch(&pc, "import_tracker", json!({ "text": text }), false).unwrap();
+        let (c1, _) = exchange(&pc, &phone);
+        {
+            let d = phone.data.lock().unwrap();
+            println!("records sent to the phone: {c1}; phone has {} assets, {} snapshots", d.assets.len(), d.snapshots.len());
+        }
+        assert_eq!(names(&phone), names(&pc));
+        let total = |c: &Arc<Core>| c.data.lock().unwrap().assets.iter().map(|a| a.value).sum::<f64>();
+        assert!((total(&phone) - total(&pc)).abs() < 1e-6);
+        assert_eq!(exchange(&pc, &phone), (0, 0));
+    }
+
 
     #[test]
     fn legacy_goal_is_migrated_once() {
@@ -2951,8 +3368,8 @@ mod tests {
         let core = Arc::new(c);
         core.data.lock().unwrap().assets.push(Asset { id: 1, name: "我的秘密存款".into(), currency: "TWD".into(), value: 123.0, ..Default::default() });
         {
-            let d = core.data.lock().unwrap();
-            core.persist(&d).unwrap();
+            let mut d = core.data.lock().unwrap();
+            core.persist(&mut d).unwrap();
         }
         assert!(core.set_password("", "abc").is_err()); // too short
         core.set_password("", "secret1").unwrap();
@@ -2964,7 +3381,7 @@ mod tests {
         assert!(core.is_locked());
         assert!(dispatch(&core, "get_data", Value::Null, false).is_err());
         assert!(dispatch(&core, "save_asset", Value::Null, false).is_err());
-        assert!(core.persist(&core.data.lock().unwrap()).is_err()); // must not overwrite with the empty placeholder
+        assert!(core.persist(&mut core.data.lock().unwrap()).is_err()); // must not overwrite with the empty placeholder
         assert!(core.unlock("bad-pass").is_err());
         assert!(core.is_locked());
         // a fresh start sees an encrypted file and stays locked
