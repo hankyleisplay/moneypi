@@ -90,6 +90,46 @@ jobs:
 
       - run: npm ci
 
+      # Fetch via the official GitHub API when the browser download endpoint times out.
+      # Hash pinned by tauri-cli 2.12.4's tauri-bundler Windows MSI implementation.
+      - name: Prepare verified WiX toolchain
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
+          gh release download wix3141rtm --repo wixtoolset/wix3 --pattern wix314-binaries.zip --dir $env:RUNNER_TEMP --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to download official WiX toolchain' }
+          $expected = '6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31'
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'WiX SHA-256 verification failed'
+          }
+          $tools = Join-Path $env:LOCALAPPDATA 'tauri/WixTools314'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          Expand-Archive -Path $archive -DestinationPath $tools -Force
+
+      - name: Prepare verified NSIS toolchain
+        shell: pwsh
+        run: |
+          gh release download nsis-3.13 --repo tauri-apps/binary-releases --pattern nsis-3.13.zip --dir $env:RUNNER_TEMP --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to download official NSIS toolchain' }
+          $archive = Join-Path $env:RUNNER_TEMP 'nsis-3.13.zip'
+          if ((Get-FileHash $archive -Algorithm SHA1).Hash -ne 'DB14F8AF2EA346B786C6AE19343F61AAF5E09B8E') {
+            throw 'NSIS checksum verification failed'
+          }
+          $cache = Join-Path $env:LOCALAPPDATA 'tauri'
+          Expand-Archive -Path $archive -DestinationPath $cache -Force
+          $tools = Join-Path $cache 'NSIS'
+          if (Test-Path $tools) { Remove-Item -Recurse -Force $tools }
+          Move-Item (Join-Path $cache 'nsis-3.13') $tools
+          gh release download nsis_tauri_utils-v0.5.3 --repo tauri-apps/nsis-tauri-utils --pattern nsis_tauri_utils.dll --dir $env:RUNNER_TEMP --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to download official NSIS plugin' }
+          $plugin = Join-Path $env:RUNNER_TEMP 'nsis_tauri_utils.dll'
+          if ((Get-FileHash $plugin -Algorithm SHA1).Hash -ne '75197FEE3C6A814FE035788D1C34EAD39349B860') {
+            throw 'NSIS plugin checksum verification failed'
+          }
+          $plugins = Join-Path $tools 'Plugins/x86-unicode/additional'
+          New-Item -ItemType Directory -Force -Path $plugins | Out-Null
+          Copy-Item $plugin $plugins -Force
+
       - name: Build, sign and upload to a draft release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -99,7 +139,7 @@ jobs:
         with:
           tagName: v${{ env.VERSION }}
           releaseName: MoneyPi v${{ env.VERSION }}
-          commitish: ${{ github.sha }}
+          releaseCommitish: ${{ github.sha }}
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true

@@ -724,19 +724,35 @@ fn winget_available() -> bool {
     })
 }
 
-/// Open one of a fixed set of places for the "install it yourself" guide.
-fn open_external(target: &str) -> Result<(), String> {
-    let mut c = Command::new("cmd");
+/// Only known official research pages and the existing installation guide may be opened.
+fn external_url(target: &str) -> Result<&str, String> {
     match target {
-        "releases" => c.args(["/C", "start", "", "https://github.com/cloudflare/cloudflared/releases/latest"]),
-        _ => return Err("不支援的項目".into()),
-    };
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000);
+        "releases" => Ok("https://github.com/cloudflare/cloudflared/releases/latest"),
+        "https://www.ishares.com/us/products/314116/ishares-0-3-month-treasury-bond-etf"
+        | "https://www.yuantaetfs.com/product/detail/0050/Basic_information"
+        | "https://investor.vanguard.com/investment-products/etfs/profile/vt"
+        | "https://investor.vanguard.com/investment-products/etfs/profile/voo"
+        | "https://investor.tsmc.com/chinese" => Ok(target),
+        _ => Err("不支援的項目".into()),
     }
-    c.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+fn open_external(target: &str) -> Result<(), String> {
+    let url = external_url(target)?;
+    #[cfg(windows)]
+    let mut c = {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c.creation_flags(0x0800_0000);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut c = { let mut c = Command::new("open"); c.arg(url); c };
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let mut c = { let mut c = Command::new("xdg-open"); c.arg(url); c };
+    let status = c.status().map_err(|e| e.to_string())?;
+    if status.success() { Ok(()) } else { Err("系統瀏覽器無法開啟連結".into()) }
 }
 
 // ---------------------------------------------------------- price history
@@ -2562,6 +2578,21 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn official_links_allow_only_known_pages() {
+        for url in [
+            "https://www.ishares.com/us/products/314116/ishares-0-3-month-treasury-bond-etf",
+            "https://www.yuantaetfs.com/product/detail/0050/Basic_information",
+            "https://investor.vanguard.com/investment-products/etfs/profile/vt",
+            "https://investor.vanguard.com/investment-products/etfs/profile/voo",
+            "https://investor.tsmc.com/chinese",
+        ] { assert_eq!(external_url(url).unwrap(), url); }
+        assert!(external_url("releases").unwrap().starts_with("https://github.com/"));
+        for invalid in ["https://example.com", "javascript:alert(1)", "file:///etc/passwd", "https://investor.tsmc.com/chinese&calc", "https://investor.tsmc.com.evil.test/chinese"] {
+            assert!(external_url(invalid).is_err());
+        }
+    }
+
 
     #[test]
     fn tracker_backup_converts_holdings_and_days() {
