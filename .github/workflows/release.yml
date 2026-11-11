@@ -35,7 +35,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve version and check the repository is ready
         id: ver
@@ -81,7 +81,7 @@ jobs:
           fs.writeFileSync(tmp + "/update-notes.md", notes + "\n");
           JS
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
