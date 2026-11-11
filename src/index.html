@@ -445,6 +445,7 @@
     <h4>備份與還原</h4>
     <div class="row"><span class="muted">完整備份（JSON）</span><div class="btns"><button type="button" id="backup-btn">匯出備份</button><button type="button" id="restore-btn">還原備份</button></div></div>
     <input type="file" id="restore-file" accept=".json,application/json" hidden>
+    <div class="droid-only" hidden><button type="button" id="paste-restore-btn" style="margin-top:8px;width:100%">貼上備份文字還原</button></div>
 
     <p id="serr" class="neg"></p>
     <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
@@ -519,6 +520,21 @@
     <p class="muted" id="perr">請輸入電腦上 MoneyPi「設定」裡顯示的 PIN。</p>
     <input name="pin" inputmode="numeric" autocomplete="off" placeholder="PIN" required>
     <menu><button type="submit" class="primary">連線</button></menu>
+  </form>
+</dialog>
+
+<dialog id="xdlg" class="glass">
+  <form method="dialog" id="xform">
+    <h3 id="x-title"></h3>
+    <p class="hint" id="x-hint"></p>
+    <textarea id="x-text" rows="9" spellcheck="false" autocomplete="off"></textarea>
+    <p id="x-err" class="neg"></p>
+    <menu>
+      <button type="button" id="x-copy">複製</button>
+      <button type="button" id="x-share" hidden>分享</button>
+      <button type="button" id="x-go" class="primary" hidden>還原</button>
+      <button type="button" data-close>關閉</button>
+    </menu>
   </form>
 </dialog>
 

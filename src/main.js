@@ -1658,16 +1658,50 @@ document.addEventListener("close", () => { if (syncStale) syncNow(); }, true); /
   }
 })();
 
+/* ---------- saving / loading text (the Android WebView cannot download a file the page creates) ---------- */
+// Desktop and browsers download a file. On Android a dialog shows the text with Copy / Share instead.
+function downloadFile(name, text, mime) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: mime + ";charset=utf-8" }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const xdlg = $("xdlg");
+function openTextDialog({ title, hint, text = "", readonly = false, goLabel = "", onGo = null, shareName = "" }) {
+  $("x-title").textContent = title;
+  $("x-hint").textContent = hint;
+  const ta = $("x-text");
+  ta.value = text;
+  ta.readOnly = readonly;
+  $("x-err").textContent = "";
+  $("x-copy").hidden = !readonly;
+  $("x-share").hidden = !(readonly && navigator.share);
+  $("x-go").hidden = !onGo;
+  $("x-go").textContent = goLabel;
+  $("x-go").onclick = async () => {
+    $("x-err").textContent = "";
+    try { if ((await onGo(ta.value)) !== false) xdlg.close(); } catch (err) { $("x-err").textContent = String(err); }
+  };
+  $("x-copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(ta.value); toast("已複製"); }
+    catch { ta.focus(); ta.select(); toast("請長按選取後複製"); }
+  };
+  $("x-share").onclick = async () => {
+    try { await navigator.share({ title: shareName || title, text: ta.value }); } catch (err) { if (err?.name !== "AbortError") toast("無法分享：" + err); }
+  };
+  xdlg.showModal();
+  if (readonly) { ta.focus(); ta.select(); } else ta.focus();
+}
+function saveText(name, text, mime, what) {
+  if (!isAndroid) { downloadFile(name, text, mime); toast(`已匯出${what}`); return; }
+  openTextDialog({ title: `匯出${what}`, hint: "按「複製」後貼到筆記或訊息保存；也可按「分享」傳給其他 App。", text, readonly: true, shareName: name });
+}
+
 /* ---------- CSV export / import ---------- */
 $("export-btn").onclick = async () => {
   try {
-    const csv = await invoke("export_csv");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    a.download = `moneypi-${todayStr()}.csv`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    toast("已匯出 CSV");
+    saveText(`moneypi-${todayStr()}.csv`, await invoke("export_csv"), "text/csv", " CSV");
   } catch (err) { toast("匯出失敗：" + err); }
 };
 $("import-btn").onclick = () => $("import-file").click();
@@ -1994,38 +2028,41 @@ fform.onsubmit = async (e) => {
 /* ---------- full backup / restore ---------- */
 $("backup-btn").onclick = async () => {
   try {
-    const txt = await invoke("export_backup");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([txt], { type: "application/json;charset=utf-8" }));
-    a.download = `moneypi-backup-${todayStr()}.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    toast("已匯出備份");
+    saveText(`moneypi-backup-${todayStr()}.json`, await invoke("export_backup"), "application/json", "備份");
   } catch (err) { toast("備份失敗：" + err); }
 };
 $("restore-btn").onclick = () => $("restore-file").click();
-$("restore-file").onchange = async (e) => {
-  const f = e.target.files[0];
-  e.target.value = "";
-  if (!f) return;
-  if (!(await confirmBox("還原備份？", "將以備份內容取代目前所有資料（原資料會自動另存為 moneypi.before-restore.json）", "還原"))) return;
+// Replaces everything with a backup's content (asks for the password of an encrypted backup).
+async function restoreFromText(text) {
+  if (!(await confirmBox("還原備份？", "將以備份內容取代目前所有資料（原資料會自動另存為 moneypi.before-restore.json）", "還原"))) return false;
   try {
-    const text = await f.text();
     let password, again = "";
     for (;;) {
       try { data = await invoke("import_backup", { text, password }); break; }
       catch (err) {
         if (String(err) !== "ENCRYPTED" && !String(err).includes("密碼錯誤")) throw err;
         password = await askPassword("這是加密的備份", "請輸入建立這份備份時的密碼。", { err: String(err) === "ENCRYPTED" ? "" : again });
-        if (password === null) return;
+        if (password === null) return false;
         again = "密碼錯誤，請再試一次";
       }
     }
     ui.sel = null;
     render();
     toast("已還原備份");
-  } catch (err) { toast("還原失敗：" + err); }
+    return true;
+  } catch (err) { toast("還原失敗：" + err); return false; }
+}
+$("restore-file").onchange = async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (f) await restoreFromText(await f.text());
 };
+$("paste-restore-btn").onclick = () => openTextDialog({
+  title: "貼上備份文字還原", hint: "把先前「匯出備份」複製下來的文字整段貼在下面。", goLabel: "還原", onGo: (t) => {
+    if (!t.trim()) throw "請先貼上備份文字";
+    return restoreFromText(t);
+  },
+});
 
 /* ---------- phone / LAN connection (desktop only) ---------- */
 const phdlg = $("phdlg");
@@ -2347,6 +2384,7 @@ if (inTauri) {
 /* ---------- boot ---------- */
 document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !(inTauri && !isAndroid)));
 document.querySelectorAll(".peer-only").forEach((el) => (el.hidden = !inTauri));
+document.querySelectorAll(".droid-only").forEach((el) => (el.hidden = !isAndroid));
 // Launch splash: shown while the app loads, at least 0.9 s so the animation reads, then fades out.
 function hideSplash() {
   const sp = $("splash");

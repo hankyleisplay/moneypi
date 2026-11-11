@@ -473,3 +473,8 @@ html.rest *,html.rest *::before,html.rest *::after{animation-play-state:paused!i
 @keyframes spPulse{50%{transform:scale(1.7);opacity:.4}}
 #peer-status.err{color:var(--neg)}
 #sdlg .peer-only label{margin-top:8px}
+
+/* ---------- text export / paste dialog (Android cannot download files from the page) ---------- */
+#xdlg textarea{width:100%;font:12px/1.5 ui-monospace,"Cascadia Mono",Consolas,monospace;color:var(--fg);padding:10px 12px;border-radius:14px;background:var(--field);
+  border:1px solid var(--line);box-shadow:inset 0 1px 3px rgba(40,55,120,.08);resize:vertical;min-height:140px;margin-top:8px}
+#xdlg textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,107,255,.18);outline:0}

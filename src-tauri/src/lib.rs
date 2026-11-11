@@ -240,6 +240,10 @@ struct Data {
     /// Name shown on the other device; empty = the computer name / "手機".
     #[serde(default)]
     device_name: String,
+    /// Random id of this installation (not the device number): lets the other device recognise this one again after its
+    /// IP address changed.
+    #[serde(default)]
+    install_id: String,
 }
 
 /// The device this one syncs with: where to reach it and the PIN it expects.
@@ -248,6 +252,9 @@ struct Peer {
     url: String,
     pin: String,
     name: String,
+    /// `install_id` of that device, so it can be found again on the network when its IP changes.
+    #[serde(default)]
+    id: String,
     /// ms since epoch of the last successful sync
     #[serde(default)]
     last_sync: u64,
@@ -323,6 +330,7 @@ impl Default for Data {
             stamps: BTreeMap::new(),
             peer: None,
             device_name: String::new(),
+            install_id: String::new(),
         }
     }
 }
@@ -454,18 +462,39 @@ fn sync_payload(d: &Data) -> SyncPayload {
     }
 }
 
+/// How to settle a record that both devices changed since they last synced (instead of dropping one side's edit).
+struct Conflict<T> {
+    /// ms of the last sync with that device; 0 = unknown, then the later edit simply wins
+    base: u64,
+    now: u64,
+    /// (newer, older) -> merged
+    resolve: fn(&T, &T) -> T,
+    digest: fn(&T) -> u64,
+}
+
 /// Merge one record collection: for every key either side knows, the newer stamp wins (equal time: the larger hash,
-/// so both devices pick the same one). A newer tombstone deletes the record.
-fn merge_records<T: Clone>(local: &mut Vec<T>, remote: &[T], id_of: fn(&T) -> u64, prefix: &str, ls: &mut BTreeMap<String, Stamp>, rs: &BTreeMap<String, Stamp>) {
+/// so both devices pick the same one). A newer tombstone deletes the record. A record both sides edited since the last
+/// sync is merged with `conflict.resolve` when given.
+fn merge_records<T: Clone>(local: &mut Vec<T>, remote: &[T], id_of: fn(&T) -> u64, prefix: &str, ls: &mut BTreeMap<String, Stamp>, rs: &BTreeMap<String, Stamp>, conflict: Option<&Conflict<T>>) {
     let keys: std::collections::BTreeSet<String> = ls.keys().chain(rs.keys()).filter(|k| k.starts_with(prefix)).cloned().collect();
     for k in keys {
         let Some(r) = rs.get(&k) else { continue };
+        let id: u64 = k[prefix.len()..].parse().unwrap_or(0);
+        if let (Some(l), Some(c)) = (ls.get(&k), conflict) {
+            if c.base > 0 && l.at > c.base && r.at > c.base && !l.del && !r.del && l.h != r.h {
+                if let (Some(i), Some(rr)) = (local.iter().position(|x| id_of(x) == id), remote.iter().find(|x| id_of(x) == id)) {
+                    let merged = if (r.at, r.h) > (l.at, l.h) { (c.resolve)(rr, &local[i]) } else { (c.resolve)(&local[i], rr) };
+                    ls.insert(k.clone(), Stamp { h: (c.digest)(&merged), at: c.now, del: false });
+                    local[i] = merged;
+                    continue;
+                }
+            }
+        }
         if let Some(l) = ls.get(&k) {
             if (r.at, r.h) <= (l.at, l.h) {
                 continue;
             }
         }
-        let id: u64 = k[prefix.len()..].parse().unwrap_or(0);
         if r.del {
             local.retain(|x| id_of(x) != id);
         } else if let Some(rec) = remote.iter().find(|x| id_of(x) == id) {
@@ -480,8 +509,30 @@ fn merge_records<T: Clone>(local: &mut Vec<T>, remote: &[T], id_of: fn(&T) -> u6
     }
 }
 
+/// Two edits of the same asset: take the newer one's fields and keep every transaction either side recorded
+/// (as a multiset, so a buy that both sides entered identically is not counted twice).
+fn merge_asset_conflict(newer: &Asset, older: &Asset) -> Asset {
+    let key = |t: &Tx| format!("{}|{}|{}|{}|{}|{}|{}", t.date, t.kind, t.units, t.price, t.fee, t.note, t.cash);
+    let mut out = newer.clone();
+    let mut have: BTreeMap<String, usize> = BTreeMap::new();
+    for t in &newer.txs {
+        *have.entry(key(t)).or_default() += 1;
+    }
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for t in &older.txs {
+        let k = key(t);
+        let n = seen.entry(k.clone()).or_default();
+        *n += 1;
+        if *n > have.get(&k).copied().unwrap_or(0) {
+            out.txs.push(t.clone());
+            *have.entry(k).or_default() += 1;
+        }
+    }
+    out
+}
+
 /// Merge what another device sent into this one. Returns how many records changed here.
-fn merge_payload(d: &mut Data, remote: &SyncPayload, now: u64) -> usize {
+fn merge_payload(d: &mut Data, remote: &SyncPayload, now: u64, base: u64) -> usize {
     stamp(d, now); // make sure our own edits are stamped before comparing
     let mut remote = remote.clone();
     if remote.stamps.is_empty() {
@@ -492,10 +543,11 @@ fn merge_payload(d: &mut Data, remote: &SyncPayload, now: u64) -> usize {
     }
     let before = d.stamps.clone();
     let mut stamps = std::mem::take(&mut d.stamps);
-    merge_records(&mut d.assets, &remote.assets, |a| a.id, "a:", &mut stamps, &remote.stamps);
-    merge_records(&mut d.goals, &remote.goals, |g| g.id, "g:", &mut stamps, &remote.stamps);
-    merge_records(&mut d.cashflow, &remote.cashflow, |f| f.id, "f:", &mut stamps, &remote.stamps);
-    merge_records(&mut d.plans, &remote.plans, |p| p.id, "p:", &mut stamps, &remote.stamps);
+    let asset_conflict = Conflict { base, now, resolve: merge_asset_conflict, digest: asset_digest };
+    merge_records(&mut d.assets, &remote.assets, |a| a.id, "a:", &mut stamps, &remote.stamps, Some(&asset_conflict));
+    merge_records(&mut d.goals, &remote.goals, |g| g.id, "g:", &mut stamps, &remote.stamps, None);
+    merge_records(&mut d.cashflow, &remote.cashflow, |f| f.id, "f:", &mut stamps, &remote.stamps, None);
+    merge_records(&mut d.plans, &remote.plans, |p| p.id, "p:", &mut stamps, &remote.stamps, None);
     d.stamps = stamps;
     let changed = d.stamps.iter().filter(|(k, v)| before.get(*k) != Some(*v)).count();
     add_missing_snapshots(&mut d.snapshots, remote.snapshots.clone(), "9999-12-31");
@@ -571,6 +623,9 @@ fn migrate(d: &mut Data) {
     }
     if d.stamps.is_empty() {
         stamp(d, 0); // records that existed before sync support count as old
+    }
+    if d.install_id.is_empty() {
+        d.install_id = random_hex(8);
     }
 }
 
@@ -850,6 +905,8 @@ struct Core {
     /// Bumped on every write (and lock/unlock) so other windows/phones can notice changes without polling the data.
     rev: std::sync::atomic::AtomicU64,
     peer_status: Mutex<PeerStatus>,
+    /// ms of the last network sweep for a moved peer (rate limit)
+    last_sweep: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default, Clone)]
@@ -1953,7 +2010,8 @@ impl Core {
     fn sync(&self, remote: SyncPayload) -> Result<Value, String> {
         let _guard = self.plan_lock.lock().unwrap(); // never in the middle of booking plans
         let mut d = self.data.lock().unwrap();
-        let changed = merge_payload(&mut d, &remote, now_ms());
+        let base = d.peer.as_ref().map(|p| p.last_sync).unwrap_or(0); // last time we synced with that device
+        let changed = merge_payload(&mut d, &remote, now_ms(), base);
         self.commit(&mut d)?;
         Ok(json!({ "changed": changed, "payload": sync_payload(&d) }))
     }
@@ -1981,12 +2039,14 @@ impl Core {
                 if let Ok((url, pin)) = parse_peer_link(url, pin) {
                     let mut d = self.data.lock().unwrap();
                     let name = r.get("name").and_then(Value::as_str).unwrap_or("").trim().chars().take(40).collect::<String>();
-                    d.peer = Some(Peer { url, pin, name: if name.is_empty() { "另一台裝置".into() } else { name }, last_sync: now_ms() });
+                    let id = r.get("id").and_then(Value::as_str).unwrap_or("").chars().take(32).collect::<String>();
+                    d.peer = Some(Peer { url, pin, name: if name.is_empty() { "另一台裝置".into() } else { name }, id, last_sync: now_ms() });
                     let _ = self.persist(&mut d);
                 }
             }
         }
         out["name"] = json!(self.my_name());
+        out["id"] = json!(self.data.lock().unwrap().install_id);
         Ok(out)
     }
 
@@ -2000,7 +2060,7 @@ impl Core {
             return None;
         }
         let ip = lan_ips().into_iter().next()?;
-        Some(json!({ "url": format!("http://{ip}:{port}"), "pin": pin, "name": self.my_name() }))
+        Some(json!({ "url": format!("http://{ip}:{port}"), "pin": pin, "name": self.my_name(), "id": self.data.lock().unwrap().install_id }))
     }
 
     fn set_peer_status(&self, state: &str, message: &str) {
@@ -2008,7 +2068,7 @@ impl Core {
     }
 
     /// One exchange with the bound device: send ours, merge theirs. Short timeouts, so an absent device costs seconds.
-    fn exchange_with(&self, url: &str, pin: &str) -> Result<(String, usize), PeerError> {
+    fn exchange_with(&self, url: &str, pin: &str) -> Result<(String, String, usize), PeerError> {
         let payload = {
             let mut d = self.data.lock().unwrap();
             stamp(&mut d, now_ms());
@@ -2025,7 +2085,7 @@ impl Core {
         let v: Value = resp.into_json().map_err(|e| PeerError::Other(format!("回應格式錯誤：{e}")))?;
         let remote: SyncPayload = serde_json::from_value(v["payload"].clone()).map_err(|e| PeerError::Other(format!("同步資料格式錯誤：{e}")))?;
         let merged = self.sync(remote).map_err(PeerError::Other)?;
-        Ok((v["name"].as_str().unwrap_or("").to_string(), merged["changed"].as_u64().unwrap_or(0) as usize))
+        Ok((v["name"].as_str().unwrap_or("").to_string(), v["id"].as_str().unwrap_or("").chars().take(32).collect(), merged["changed"].as_u64().unwrap_or(0) as usize))
     }
 
     /// Bind to the other device (first sync, which also tells it how to reach us), then keep it as the peer.
@@ -2033,10 +2093,10 @@ impl Core {
         let (url, pin) = parse_peer_link(link, pin)?;
         self.set_peer_status("syncing", "");
         match self.exchange_with(&url, &pin) {
-            Ok((name, _)) => {
+            Ok((name, id, _)) => {
                 {
                     let mut d = self.data.lock().unwrap();
-                    d.peer = Some(Peer { url, pin, name: if name.is_empty() { "另一台裝置".into() } else { name }, last_sync: now_ms() });
+                    d.peer = Some(Peer { url, pin, name: if name.is_empty() { "另一台裝置".into() } else { name }, id, last_sync: now_ms() });
                     self.persist(&mut d)?;
                 }
                 self.set_peer_status("ok", "");
@@ -2050,17 +2110,45 @@ impl Core {
     }
 
     /// Sync with the bound device (called when the app starts, comes back to the front, and after local edits).
+    /// If it cannot be reached but is known by its id, look for it on the local network: its IP address may have changed.
     fn sync_peer(&self) -> Result<Value, String> {
+        self.sync_peer_with(&lan_candidates)
+    }
+
+    fn sync_peer_with(&self, candidates: &dyn Fn() -> Vec<String>) -> Result<Value, String> {
         let Some(peer) = self.data.lock().unwrap().peer.clone() else { return Err("尚未綁定裝置".into()) };
         self.set_peer_status("syncing", "");
-        match self.exchange_with(&peer.url, &peer.pin) {
-            Ok((name, changed)) => {
+        let mut result = self.exchange_with(&peer.url, &peer.pin);
+        if matches!(result, Err(PeerError::Offline)) && !peer.id.is_empty() {
+            let last = self.last_sweep.load(std::sync::atomic::Ordering::SeqCst);
+            if now_ms().saturating_sub(last) > 120_000 {
+                self.last_sweep.store(now_ms(), std::sync::atomic::Ordering::SeqCst);
+                let port = peer.url.rsplit(':').next().and_then(|p| p.trim_matches('/').parse::<u16>().ok()).unwrap_or(DEFAULT_PORT);
+                if let Some(found) = sweep_for(&peer.id, port, &candidates()) {
+                    if found != peer.url {
+                        {
+                            let mut d = self.data.lock().unwrap();
+                            if let Some(p) = d.peer.as_mut() {
+                                p.url = found.clone();
+                            }
+                            let _ = self.persist(&mut d);
+                        }
+                        result = self.exchange_with(&found, &peer.pin);
+                    }
+                }
+            }
+        }
+        match result {
+            Ok((name, id, changed)) => {
                 {
                     let mut d = self.data.lock().unwrap();
                     if let Some(p) = d.peer.as_mut() {
                         p.last_sync = now_ms();
                         if !name.is_empty() {
                             p.name = name;
+                        }
+                        if !id.is_empty() {
+                            p.id = id;
                         }
                     }
                     self.persist(&mut d)?;
@@ -2849,6 +2937,12 @@ fn handle_http(core: Arc<Core>, mut req: tiny_http::Request) {
             return;
         }
         let _ = match url.as_str() {
+            // no secrets here: just enough for a paired device to recognise this one after an IP change
+            "/moneypi-id" => req.respond(
+                Response::from_string(json!({ "app": "moneypi", "id": core.data.lock().unwrap().install_id }).to_string())
+                    .with_header(hdr("Content-Type", "application/json; charset=utf-8"))
+                    .with_header(hdr("Cache-Control", "no-store")),
+            ),
             "/" | "/index.html" => req.respond(static_page(INDEX_HTML.as_bytes(), "text/html; charset=utf-8")),
             "/style.css" => req.respond(static_page(STYLE_CSS.as_bytes(), "text/css; charset=utf-8")),
             "/main.js" => req.respond(static_page(MAIN_JS.as_bytes(), "text/javascript; charset=utf-8")),
@@ -2916,6 +3010,48 @@ fn is_private_ip(ip: &str) -> bool {
         || ip.starts_with("10.")
         || (ip.starts_with("172.")
             && ip.split('.').nth(1).and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (16..=31).contains(&n)))
+}
+
+/// Every host on the /24 networks of this machine's addresses, except itself.
+fn lan_candidates() -> Vec<String> {
+    let mut out = vec![];
+    for ip in lan_ips() {
+        let p: Vec<&str> = ip.split('.').collect();
+        if p.len() == 4 {
+            for last in 1..=254u32 {
+                if p[3].parse::<u32>().ok() != Some(last) {
+                    out.push(format!("{}.{}.{}.{last}", p[0], p[1], p[2]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Ask each address on `port` who it is (a small unauthenticated reply with just an install id) and return the base url
+/// of the one whose id matches. 48 at a time with short timeouts: a /24 takes a few seconds.
+fn sweep_for(id: &str, port: u16, ips: &[String]) -> Option<String> {
+    let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_millis(600)).timeout(Duration::from_millis(1500)).build();
+    for chunk in ips.chunks(48) {
+        let hit: Option<String> = thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|ip| {
+                    let agent = agent.clone();
+                    s.spawn(move || {
+                        let url = format!("http://{ip}:{port}");
+                        let v: Value = agent.get(&format!("{url}/moneypi-id")).call().ok()?.into_json().ok()?;
+                        (v["app"] == "moneypi" && v["id"].as_str() == Some(id)).then_some(url)
+                    })
+                })
+                .collect();
+            handles.into_iter().find_map(|h| h.join().ok().flatten())
+        });
+        if hit.is_some() {
+            return hit;
+        }
+    }
+    None
 }
 
 /// Private IPv4 addresses of this machine, the default-route one first.
@@ -3021,6 +3157,7 @@ pub fn run() {
                 enc: Mutex::new(enc),
                 rev: Default::default(),
                 peer_status: Default::default(),
+                last_sweep: Default::default(),
             });
             if enabled {
                 if let Err(e) = core.start_server("0.0.0.0", port) {
@@ -3246,6 +3383,9 @@ mod tests {
             d.device = 7;
             d.primary = false;
         }
+        for c in [&a, &b] {
+            c.data.lock().unwrap().install_id = random_hex(8);
+        }
         (a, b)
     }
     fn save(c: &Arc<Core>, v: Value) -> Value {
@@ -3400,13 +3540,13 @@ mod tests {
         let mut remote = sync_payload(&d);
         remote.assets[0].value = 9.0;
         remote.stamps.insert("a:1".into(), Stamp { h: 123, at: 5, del: false });
-        merge_payload(&mut d, &remote, 10);
+        merge_payload(&mut d, &remote, 10, 0);
         assert_eq!(d.assets[0].value, 9.0);
         // a payload without stamps (older peer) never overrides
         let mut old = sync_payload(&d);
         old.stamps.clear();
         old.assets[1].value = 1.0;
-        merge_payload(&mut d, &old, 20);
+        merge_payload(&mut d, &old, 20, 0);
         assert_eq!(d.assets[1].value, 6.0);
     }
 
@@ -3508,6 +3648,132 @@ mod tests {
     }
 
 
+    // ------------------------------------------------ moved peer + concurrent edits
+
+    #[test]
+    fn a_moved_peer_is_found_again_by_its_id() {
+        let (pc, phone) = pair();
+        let pa = free_port();
+        {
+            let mut d = pc.data.lock().unwrap();
+            d.sync_pin = "123456".into();
+            d.sync_port = pa;
+        }
+        pc.start_server("0.0.0.0", pa).unwrap();
+        // /moneypi-id says who it is and nothing else
+        let v: Value = ureq::get(&format!("http://127.0.0.1:{pa}/moneypi-id")).call().unwrap().into_json().unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 2);
+        let id = pc.data.lock().unwrap().install_id.clone();
+        assert_eq!((v["app"].as_str(), v["id"].as_str()), (Some("moneypi"), Some(id.as_str())));
+
+        phone.pair_peer(&format!("127.0.0.1:{pa}"), "123456").unwrap();
+        assert_eq!(phone.data.lock().unwrap().peer.as_ref().unwrap().id, id);
+
+        // the PC got a new address: the phone still has the old one (a blackhole address) but knows the id
+        let moved = |c: &Arc<Core>| c.data.lock().unwrap().peer.as_mut().unwrap().url = format!("http://192.0.2.1:{pa}");
+        moved(&phone);
+        save(&pc, cash("換 IP 後新增", 1.0));
+        let r = phone.sync_peer_with(&|| vec!["127.0.0.1".into()]).unwrap();
+        assert_eq!(r["state"], "ok", "{r}");
+        assert_eq!(phone.data.lock().unwrap().peer.as_ref().unwrap().url, format!("http://127.0.0.1:{pa}"));
+        assert!(names(&phone).contains(&"換 IP 後新增".to_string()));
+
+        // a second loss within two minutes does not sweep the network again
+        moved(&phone);
+        let r = phone.sync_peer_with(&|| panic!("must not sweep again so soon")).unwrap();
+        assert_eq!(r["state"], "offline");
+
+        // somebody else with a different id is never taken for the PC
+        phone.last_sweep.store(0, std::sync::atomic::Ordering::SeqCst);
+        phone.data.lock().unwrap().peer.as_mut().unwrap().id = "not-the-pc".into();
+        let r = phone.sync_peer_with(&|| vec!["127.0.0.1".into()]).unwrap();
+        assert_eq!(r["state"], "offline");
+        assert!(phone.data.lock().unwrap().peer.as_ref().unwrap().url.contains("192.0.2.1"));
+        pc.stop_server();
+    }
+
+    fn bind_for_merge(a: &Arc<Core>, b: &Arc<Core>) {
+        // what a real pairing records: the time of the last sync (the base for telling real conflicts apart)
+        let t = now_ms();
+        for c in [a, b] {
+            c.data.lock().unwrap().peer = Some(Peer { url: "http://x:1".into(), pin: "1".into(), name: "x".into(), id: String::new(), last_sync: t });
+        }
+        pause();
+    }
+    fn buy(c: &Arc<Core>, id: u64, date: &str, units: f64, price: f64) {
+        dispatch(c, "add_tx", json!({ "id": id, "tx": { "date": date, "kind": "buy", "units": units, "price": price, "fee": 0.0 } }), false).unwrap();
+    }
+    fn stock_json(name: &str) -> Value {
+        json!({ "name": name, "category": "股票", "currency": "TWD", "value": 0.0, "holding": true, "market": "", "symbol": "", "quantity": 0.0, "price": 10.0 })
+    }
+    fn tx_count(c: &Arc<Core>, id: u64) -> (usize, f64) {
+        let d = c.data.lock().unwrap();
+        let a = d.assets.iter().find(|a| a.id == id).unwrap();
+        (a.txs.len(), a.quantity)
+    }
+
+    #[test]
+    fn buys_entered_on_both_devices_since_the_last_sync_are_all_kept() {
+        let (pc, phone) = pair();
+        save(&pc, stock_json("台積電"));
+        exchange(&pc, &phone);
+        let id = pc.data.lock().unwrap().assets[0].id;
+        bind_for_merge(&pc, &phone);
+        buy(&pc, id, "2026-11-10", 1.0, 100.0);
+        pause();
+        buy(&phone, id, "2026-11-11", 2.0, 110.0);
+        for _ in 0..3 {
+            exchange(&pc, &phone);
+        }
+        assert_eq!(tx_count(&pc, id), (2, 3.0));
+        assert_eq!(tx_count(&phone, id), (2, 3.0));
+        assert_eq!(exchange(&pc, &phone), (0, 0), "settled");
+    }
+
+    #[test]
+    fn a_buy_entered_identically_on_both_sides_counts_once_but_two_real_ones_stay_two() {
+        let a = Asset { txs: vec![tx("2026-11-10", 1.0, 100.0), tx("2026-11-10", 1.0, 100.0)], ..Default::default() };
+        let b = Asset { txs: vec![tx("2026-11-10", 1.0, 100.0), tx("2026-11-11", 5.0, 9.0)], ..Default::default() };
+        let m = merge_asset_conflict(&a, &b);
+        assert_eq!(m.txs.len(), 3, "two identical stay two (the larger count), plus the one only b has");
+        fn tx(date: &str, units: f64, price: f64) -> Tx {
+            Tx { date: date.into(), kind: "buy".into(), units, price, ..Default::default() }
+        }
+    }
+
+    #[test]
+    fn a_delete_on_one_side_is_not_undone_when_only_that_side_changed() {
+        let (pc, phone) = pair();
+        save(&pc, stock_json("台積電"));
+        exchange(&pc, &phone);
+        let id = pc.data.lock().unwrap().assets[0].id;
+        buy(&pc, id, "2026-11-01", 1.0, 100.0);
+        buy(&pc, id, "2026-11-02", 1.0, 100.0);
+        exchange(&pc, &phone);
+        bind_for_merge(&pc, &phone);
+        dispatch(&phone, "delete_tx", json!({ "id": id, "index": 0 }), false).unwrap(); // only the phone changed the asset
+        for _ in 0..2 {
+            exchange(&pc, &phone);
+        }
+        assert_eq!(tx_count(&pc, id), (1, 1.0));
+        assert_eq!(tx_count(&phone, id), (1, 1.0));
+    }
+
+    #[test]
+    fn without_a_known_last_sync_the_later_edit_still_wins() {
+        let (pc, phone) = pair();
+        save(&pc, stock_json("台積電"));
+        exchange(&pc, &phone);
+        let id = pc.data.lock().unwrap().assets[0].id; // no peer recorded => base 0
+        buy(&pc, id, "2026-11-10", 1.0, 100.0);
+        pause();
+        buy(&phone, id, "2026-11-11", 2.0, 110.0);
+        exchange(&pc, &phone);
+        assert_eq!(tx_count(&pc, id), tx_count(&phone, id));
+        assert_eq!(tx_count(&pc, id).0, 1, "plain last-writer-wins: the phone's later edit replaced the whole asset");
+    }
+
+
     #[test]
     fn legacy_goal_is_migrated_once() {
         let mut d: Data = serde_json::from_str(
@@ -3569,6 +3835,7 @@ mod tests {
             enc: Mutex::new(EncState::default()),
             rev: Default::default(),
             peer_status: Default::default(),
+            last_sweep: Default::default(),
         }
     }
 
