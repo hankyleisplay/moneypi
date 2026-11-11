@@ -42,6 +42,25 @@ jobs:
           for n in KEYSTORE_B64 KEYSTORE_PW KEY_ALIAS; do
             [ -n "${!n}" ] || { echo "::error::Repository secret for $n is not set (ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS)"; exit 1; }
           done
+
+          # Check the key now, not after the 8-minute build. The expected size and certificate fingerprint are not secret;
+          # they make sure this is the MoneyPi release key (a different key would make phones refuse the update).
+          # If the key is ever replaced on purpose, update these two values.
+          EXPECTED_SIZE=4298
+          EXPECTED_FP="0B:FD:ED:64:DA:E2:D7:91:69:9A:3D:4E:12:C2:B1:F7:B3:40:C5:F2:77:4E:CB:64:35:E2:0C:9E:C0:6F:C4:F8"
+          B64=$(printf '%s' "$KEYSTORE_B64" | tr -d ' \r\n\t')
+          printf '%s' "$B64" | base64 -d > "$RUNNER_TEMP/check.jks" 2>/dev/null || { echo "::error::ANDROID_KEYSTORE_BASE64 is not valid base64 (pasted ${#B64} characters)"; exit 1; }
+          SIZE=$(wc -c < "$RUNNER_TEMP/check.jks")
+          if [ "$SIZE" != "$EXPECTED_SIZE" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is incomplete: ${#B64} characters pasted, decoded to $SIZE bytes, expected $EXPECTED_SIZE bytes. Paste the whole content of keystore.base64.txt again (no spaces or line breaks; it ends with the same characters it was given with)."
+            rm -f "$RUNNER_TEMP/check.jks"; exit 1
+          fi
+          keytool -list -v -keystore "$RUNNER_TEMP/check.jks" -storepass "$KEYSTORE_PW" -alias "$KEY_ALIAS" > "$RUNNER_TEMP/check.txt" 2>&1 \
+            || { echo "::error::cannot read the key: ANDROID_KEYSTORE_PASSWORD or ANDROID_KEY_ALIAS is wrong"; rm -f "$RUNNER_TEMP/check.jks"; exit 1; }
+          FP=$(grep -m1 "SHA256:" "$RUNNER_TEMP/check.txt" | sed 's/.*SHA256: *//' | tr -d '[:space:]')
+          rm -f "$RUNNER_TEMP/check.jks" "$RUNNER_TEMP/check.txt"
+          [ "$FP" = "$EXPECTED_FP" ] || { echo "::error::this key's certificate fingerprint ($FP) is not the MoneyPi release key ($EXPECTED_FP)"; exit 1; }
+          echo "Signing key OK ($SIZE bytes, fingerprint matches)"
           conf=$(node -p "require('./src-tauri/tauri.conf.json').version")
           pkg=$(node -p "require('./package.json').version")
           cargo=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'"' -f2)
