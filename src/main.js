@@ -214,18 +214,32 @@ tKind.setOptions([{ value: "buy", label: "買入" }, { value: "sell", label: "�
 
 /* ---------- sidebar collapse / hide amounts ---------- */
 const side = $("side");
-function setCollapsed(c) {
+// Window size class, so the layout follows the window (phone, folded / unfolded foldable, tablet, desktop):
+// compact <= 640, medium 641-899, expanded >= 900. The list is a floating drawer on the first two.
+const sizeClass = () => (innerWidth <= 640 ? "compact" : innerWidth < 900 ? "medium" : "expanded");
+let curSize = sizeClass();
+const floating = () => curSize !== "expanded";
+// auto = not a user choice (a size change or a tap outside): the choice is only remembered when the user makes it, once per size class
+function setCollapsed(c, auto) {
   side.classList.toggle("collapsed", c);
   $("collapse-btn").title = $("collapse-btn").ariaLabel = c ? "展開清單" : "收合清單";
-  store.set("collapsed", c ? "1" : "0");
+  if (!auto) store.set("collapsed_" + curSize, c ? "1" : "0");
+}
+function applySize(first) {
+  const s = sizeClass(), changed = s !== curSize;
+  curSize = s;
+  document.documentElement.dataset.size = s;
+  if (first || changed) setCollapsed(store.get("collapsed_" + s, s === "expanded" ? store.get("collapsed", "0") : "1") === "1", true); // the old single flag only seeds "expanded"
 }
 side.style.transition = "none"; // no slide animation on first paint
-setCollapsed(store.get("collapsed", innerWidth < 760 ? "1" : "0") === "1");
+applySize(true);
 requestAnimationFrame(() => requestAnimationFrame(() => (side.style.transition = "")));
+let sizeRaf = 0;
+addEventListener("resize", () => { cancelAnimationFrame(sizeRaf); sizeRaf = requestAnimationFrame(() => applySize(false)); }); // fold / unfold / rotate / split screen
 $("collapse-btn").onclick = () => setCollapsed(!side.classList.contains("collapsed"));
-// phone: the expanded list floats over the page, so a tap anywhere else closes it
+// compact / medium: the expanded list floats over the page, so a tap anywhere else closes it
 document.addEventListener("click", (e) => {
-  if (innerWidth <= 640 && !side.classList.contains("collapsed") && !e.target.closest("#side, dialog")) setCollapsed(true);
+  if (floating() && !side.classList.contains("collapsed") && !e.target.closest("#side, dialog")) setCollapsed(true, true);
 });
 $("hide-btn").onclick = () => {
   ui.hidden = !ui.hidden;
@@ -775,7 +789,7 @@ function select(id) {
   renderList();
   renderView();
   $("view-overview").parentElement.scrollTop = 0;
-  if (innerWidth <= 640) setCollapsed(true);
+  if (floating()) setCollapsed(true, true);
 }
 $("nav-overview").onclick = () => select(null);
 $("nav-flow").onclick = () => select("flow");
@@ -1104,7 +1118,7 @@ function openDialog(asset) {
 }
 $("add-btn").onclick = () => {
   openDialog(null);
-  if (innerWidth <= 640) setCollapsed(true);
+  if (floating()) setCollapsed(true, true);
 };
 
 form.onsubmit = async (e) => {
@@ -1565,11 +1579,15 @@ const CURRENCIES = [
 const curInfo = (code) => { const c = CURRENCIES.find((x) => x[0] === code); return c ? { name: c[1], flag: c[2] } : code === "TWD" ? { name: "台幣", flag: "🇹🇼" } : { name: "", flag: "💱" }; };
 const curLabel = (code) => { const i = curInfo(code); return i.name ? `${i.flag} ${i.name}（${code}）` : code; };
 
+const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>';
 function rateRow(code, val) {
-  const base = code === "TWD", i = curInfo(code);
+  const base = code === "TWD", i = curInfo(code), used = data.assets.filter((a) => a.currency === code).length;
+  const right = base ? '<span class="base-note">基準，固定為 1</span>'
+    : used ? `<span class="rm-used" title="有項目正在使用這個幣別，要先改掉那些項目才能移除">使用中 ${used} 項</span>`
+    : `<button type="button" class="rm-btn" data-rm aria-label="移除 ${esc(code)}">${TRASH}移除</button>`;
   return `<div class="rate-row" data-code="${esc(code)}">
     <span class="rc"><span>${i.flag}</span><b>${esc(i.name || code)}</b><small>${esc(code)}</small></span>
-    ${base ? '<span class="base-note">基準，固定為 1</span>' : '<button type="button" class="link" data-rm>移除</button>'}
+    ${right}
     <span class="rv"><span class="rp">1 ${esc(code)} =</span> <input type="number" min="0" step="any" inputmode="decimal" value="${val}" ${base ? "disabled" : ""}> 台幣</span></div>`;
 }
 
@@ -1577,12 +1595,19 @@ function rateRow(code, val) {
 let ddRate, rateReq = 0;
 const ratesShown = () => [...document.querySelectorAll("#rates .rate-row")].map((r) => r.dataset.code);
 function refreshRatePicker() {
-  const have = new Set(ratesShown());
-  ddRate.setOptions([{ value: "", label: "選擇幣別…" }, ...CURRENCIES.filter((c) => !have.has(c[0])).map((c) => ({ value: c[0], label: curLabel(c[0]) })), { value: "__other", label: "其他幣別（自己輸入代碼）…" }], "");
-  rateAddReset();
+  const have = new Set(ratesShown()), before = ddRate.value;
+  ddRate.setOptions([{ value: "", label: "選擇幣別…" }, ...CURRENCIES.filter((c) => !have.has(c[0])).map((c) => ({ value: c[0], label: curLabel(c[0]) })), { value: "__other", label: "其他幣別（自己輸入代碼）…" }], before);
+  if (ddRate.value !== before) rateAddReset(); // what was picked is gone from the list: start the form over, otherwise keep it
+  updateAddState();
+}
+// "加入" is only clickable once there is a valid currency and a rate above 0
+function updateAddState() {
+  const code = rateCode();
+  $("rate-add-btn").disabled = !(/^[A-Z]{2,5}$/.test(code) && parseFloat($("new-rate").value) > 0 && !ratesShown().includes(code));
 }
 function rateAddReset() {
   $("rate-other").hidden = true; $("new-code").value = $("new-rate").value = ""; $("new-cur").textContent = "—"; $("rate-hint").textContent = ""; $("rate-hint").classList.remove("err");
+  if ($("rate-add-btn")) updateAddState();
 }
 const rateCode = () => (ddRate.value === "__other" ? $("new-code").value.trim().toUpperCase() : ddRate.value);
 async function fetchRateFor(code) {
@@ -1595,12 +1620,15 @@ async function fetchRateFor(code) {
     const r = await invoke("rate_quote", { code });
     if (my !== rateReq) return;
     $("new-rate").value = Number(r.rate.toPrecision(6));
+    updateAddState();
     hint.textContent = `即時匯率：1 ${code} ≈ ${fmt.format(r.rate)} 台幣（可自行修改），確認後按「加入」。`;
   } catch (err) {
     if (my !== rateReq) return;
+    console.warn("rate_quote:", err);
     hint.classList.add("err");
-    hint.textContent = `${String(err)}。請自己輸入匯率。`;
+    hint.textContent = "目前查不到這個幣別的即時匯率，可能是沒有網路或代碼不存在。請自己輸入匯率。";
   }
+  updateAddState();
 }
 function addRateRow() {
   const code = rateCode(), v = parseFloat($("new-rate").value), hint = $("rate-hint");
@@ -1629,6 +1657,7 @@ async function openSettings() {
   $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
   ddRate ??= new Dropdown($("rate-pick"), (v) => { $("rate-other").hidden = v !== "__other"; $("new-rate").value = ""; if (v === "__other") { $("new-code").focus(); fetchRateFor(""); } else fetchRateFor(v); });
   refreshRatePicker();
+  rateAddReset();
   $("serr").textContent = "";
   sdlg.showModal();
   if (inTauri) {
@@ -1638,10 +1667,11 @@ async function openSettings() {
   }
 }
 $("settings-btn").onclick = () => { refreshSecurity(); openSettings(); };
-$("rates").onclick = (e) => { if (e.target.matches("[data-rm]")) { e.target.closest(".rate-row").remove(); refreshRatePicker(); } };
+$("rates").onclick = (e) => { const b = e.target.closest("[data-rm]"); if (b) { b.closest(".rate-row").remove(); refreshRatePicker(); } };
+$("new-rate").addEventListener("input", updateAddState);
 $("rate-add-btn").onclick = addRateRow;
 let rateTimer = 0;
-$("new-code").oninput = () => { clearTimeout(rateTimer); $("new-code").value = $("new-code").value.toUpperCase(); rateTimer = setTimeout(() => fetchRateFor($("new-code").value.trim()), 500); };
+$("new-code").oninput = () => { clearTimeout(rateTimer); $("new-code").value = $("new-code").value.toUpperCase(); updateAddState(); rateTimer = setTimeout(() => fetchRateFor($("new-code").value.trim()), 500); };
 
 sform.onsubmit = async (e) => {
   e.preventDefault();
