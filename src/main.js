@@ -75,7 +75,7 @@ function askPin(msg) {
   });
 }
 
-let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_sec: 0, cashflow: [] };
+let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_sec: 0, cashflow: [], base: "TWD", base_set: true };
 const ui = {
   kind: "all", cat: "", q: "", sort: "value", range: 0, fcRange: "1y", rm: new Date().toLocaleDateString("sv-SE").slice(0, 7), sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
   hidden: store.get("hidden", "0") === "1",
@@ -83,7 +83,10 @@ const ui = {
 
 const rate = (cur) => data.rates[cur] ?? 1;
 const toBase = (a) => a.value * rate(a.currency);
-const money = (n) => (ui.hidden ? "NT$ ••••" : "NT$ " + fmt0.format(n));
+const SYMBOLS = { TWD: "NT$", USD: "US$", JPY: "¥", CNY: "CN¥", EUR: "€", GBP: "£", HKD: "HK$", KRW: "₩", AUD: "A$", CAD: "C$", SGD: "S$", NZD: "NZ$", THB: "฿", MYR: "RM", VND: "₫", PHP: "₱", IDR: "Rp", INR: "₹" };
+const baseCur = () => data.base || "TWD"; // the main currency every total is shown in
+const sym = () => SYMBOLS[baseCur()] || baseCur();
+const money = (n) => (ui.hidden ? sym() + " ••••" : sym() + " " + fmt0.format(n));
 const sum = (xs) => xs.reduce((s, a) => s + toBase(a), 0);
 const mask = () => (ui.hidden ? "blur" : "");
 const signed = (n, f = fmt0) => (n >= 0 ? "+" : "−") + f.format(Math.abs(n));
@@ -430,7 +433,14 @@ $("goal-panel").onclick = async (e) => {
 };
 
 /* ---------- render ---------- */
+// text that names the main currency (labels, hints) follows the chosen one
+function applyBaseLabels() {
+  document.querySelectorAll(".b-sym").forEach((e) => (e.textContent = sym()));
+  document.querySelectorAll(".b-code").forEach((e) => (e.textContent = baseCur()));
+  document.querySelectorAll(".b-name").forEach((e) => (e.textContent = curInfo(baseCur()).name || baseCur()));
+}
 function render() {
+  applyBaseLabels();
   if (typeof ui.sel === "number" && !data.assets.some((a) => a.id === ui.sel)) ui.sel = null;
   const A = data.assets.filter((a) => !a.liability);
   const L = data.assets.filter((a) => a.liability);
@@ -489,7 +499,7 @@ function renderList() {
   $("empty").textContent = data.assets.length ? "沒有符合條件的項目" : "尚無項目，按下方「新增項目」開始記錄";
   $("list").innerHTML = xs
     .map((a) => {
-      const sub = [a.liability ? "負債" : "", a.holding && a.symbol ? a.symbol : a.category, a.currency === "TWD" ? "" : a.currency].filter(Boolean).join(" · ");
+      const sub = [a.liability ? "負債" : "", a.holding && a.symbol ? a.symbol : a.category, a.currency === baseCur() ? "" : a.currency].filter(Boolean).join(" · ");
       return `<button class="item ${a.id === ui.sel ? "on" : ""}" data-id="${a.id}" title="${esc(a.name)}">
       <span class="av" style="background:${catColor(a.category)}">${esc([...a.name][0] || "?")}</span>
       <span class="meta"><b>${esc(a.name)}</b><small>${esc(sub)}</small></span>
@@ -774,9 +784,9 @@ function renderView() {
     <div class="d-amount ${a.liability ? "neg" : ""} ${mask()}">${sgn}${esc(a.currency)} ${fmt.format(a.value)}</div>
     ${a.holding ? `<div class="d-cap muted">現值 = 持有數量 × 現價${tip("現值")}　（成本與損益在下方「持倉」）</div>` : ""}
     <div class="stats">
-      <div class="stat"><span>折合 TWD</span><b class="${mask()}">${sgn}${fmt0.format(toBase(a))}</b></div>
+      <div class="stat"><span>折合 ${esc(baseCur())}</span><b class="${mask()}">${sgn}${fmt0.format(toBase(a))}</b></div>
       <div class="stat"><span>佔總${a.liability ? "負債" : "資產"}</span><b>${share.toFixed(1)}%</b></div>
-      <div class="stat"><span>匯率</span><b>${a.currency === "TWD" ? "—" : `1 ${esc(a.currency)} = ${fmt.format(rate(a.currency))} TWD`}</b></div>
+      <div class="stat"><span>匯率</span><b>${a.currency === baseCur() ? "—" : `1 ${esc(a.currency)} = ${fmt.format(rate(a.currency))} ${esc(baseCur())}`}</b></div>
       <div class="stat"><span>最後更新</span><b>${esc(a.updated)}</b></div>
       <div class="stat"><span>備註</span><b>${a.note ? esc(a.note) : "—"}</b></div>
     </div>
@@ -1095,7 +1105,7 @@ function openDialog(asset) {
   $("err").textContent = "";
   const cats = asset && !CATS.includes(asset.category) ? [...CATS, asset.category] : CATS;
   fCat.setOptions(cats, asset ? asset.category : CATS[0]);
-  fCur.setOptions(Object.keys(data.rates).map((c) => ({ value: c, label: curLabel(c) })), asset ? asset.currency : "TWD");
+  fCur.setOptions(Object.keys(data.rates).map((c) => ({ value: c, label: curLabel(c) })), asset ? asset.currency : baseCur());
   fMkt.setOptions(fMkt.opts, asset ? asset.market : "");
   if (asset) {
     form.name.value = asset.name;
@@ -1571,24 +1581,24 @@ let refreshSel = 0;
 
 // Common currencies with their Chinese names, so nobody has to know ISO codes by heart.
 const CURRENCIES = [
-  ["USD", "美元", "🇺🇸"], ["JPY", "日圓", "🇯🇵"], ["EUR", "歐元", "🇪🇺"], ["GBP", "英鎊", "🇬🇧"], ["CNY", "人民幣", "🇨🇳"], ["HKD", "港幣", "🇭🇰"],
+  ["TWD", "台幣", "🇹🇼"], ["USD", "美元", "🇺🇸"], ["JPY", "日圓", "🇯🇵"], ["EUR", "歐元", "🇪🇺"], ["GBP", "英鎊", "🇬🇧"], ["CNY", "人民幣", "🇨🇳"], ["HKD", "港幣", "🇭🇰"],
   ["KRW", "韓元", "🇰🇷"], ["AUD", "澳幣", "🇦🇺"], ["CAD", "加幣", "🇨🇦"], ["SGD", "新加坡幣", "🇸🇬"], ["CHF", "瑞士法郎", "🇨🇭"], ["NZD", "紐西蘭幣", "🇳🇿"],
   ["THB", "泰銖", "🇹🇭"], ["MYR", "馬來西亞令吉", "🇲🇾"], ["VND", "越南盾", "🇻🇳"], ["PHP", "菲律賓披索", "🇵🇭"], ["IDR", "印尼盾", "🇮🇩"], ["INR", "印度盧比", "🇮🇳"],
   ["SEK", "瑞典克朗", "🇸🇪"], ["NOK", "挪威克朗", "🇳🇴"], ["DKK", "丹麥克朗", "🇩🇰"], ["AED", "阿聯迪拉姆", "🇦🇪"], ["TRY", "土耳其里拉", "🇹🇷"], ["ZAR", "南非幣", "🇿🇦"],
 ];
-const curInfo = (code) => { const c = CURRENCIES.find((x) => x[0] === code); return c ? { name: c[1], flag: c[2] } : code === "TWD" ? { name: "台幣", flag: "🇹🇼" } : { name: "", flag: "💱" }; };
+const curInfo = (code) => { const c = CURRENCIES.find((x) => x[0] === code); return c ? { name: c[1], flag: c[2] } : { name: "", flag: "💱" }; };
 const curLabel = (code) => { const i = curInfo(code); return i.name ? `${i.flag} ${i.name}（${code}）` : code; };
 
 const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>';
 function rateRow(code, val) {
-  const base = code === "TWD", i = curInfo(code), used = data.assets.filter((a) => a.currency === code).length;
+  const base = code === baseCur(), i = curInfo(code), used = data.assets.filter((a) => a.currency === code).length;
   const right = base ? '<span class="base-note">基準，固定為 1</span>'
     : used ? `<span class="rm-used" title="有項目正在使用這個幣別，要先改掉那些項目才能移除">使用中 ${used} 項</span>`
     : `<button type="button" class="rm-btn" data-rm aria-label="移除 ${esc(code)}">${TRASH}移除</button>`;
   return `<div class="rate-row" data-code="${esc(code)}">
     <span class="rc"><span>${i.flag}</span><b>${esc(i.name || code)}</b><small>${esc(code)}</small></span>
     ${right}
-    <span class="rv"><span class="rp">1 ${esc(code)} =</span> <input type="number" min="0" step="any" inputmode="decimal" value="${val}" ${base ? "disabled" : ""}> 台幣</span></div>`;
+    <span class="rv"><span class="rp">1 ${esc(code)} =</span> <input type="number" min="0" step="any" inputmode="decimal" value="${val}" ${base ? "disabled" : ""}> ${esc(curInfo(baseCur()).name || baseCur())}</span></div>`;
 }
 
 // "Add a currency": pick it by name, the live rate is filled in, then Add.
@@ -1621,7 +1631,7 @@ async function fetchRateFor(code) {
     if (my !== rateReq) return;
     $("new-rate").value = Number(r.rate.toPrecision(6));
     updateAddState();
-    hint.textContent = `即時匯率：1 ${code} ≈ ${fmt.format(r.rate)} 台幣（可自行修改），確認後按「加入」。`;
+    hint.textContent = `即時匯率：1 ${code} ≈ ${fmt.format(r.rate)} ${curInfo(baseCur()).name || baseCur()}（可自行修改），確認後按「加入」。`;
   } catch (err) {
     if (my !== rateReq) return;
     console.warn("rate_quote:", err);
@@ -1652,9 +1662,14 @@ $("refresh-seg").onclick = (e) => {
   if (b) setRefreshSeg(Number(b.dataset.s));
 };
 
+function fillSettingsRates() {
+  applyBaseLabels();
+  $("base-now").textContent = curLabel(baseCur());
+  $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
+}
 async function openSettings() {
   setRefreshSeg(data.refresh_sec || 0);
-  $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
+  fillSettingsRates();
   ddRate ??= new Dropdown($("rate-pick"), (v) => { $("rate-other").hidden = v !== "__other"; $("new-rate").value = ""; if (v === "__other") { $("new-code").focus(); fetchRateFor(""); } else fetchRateFor(v); });
   refreshRatePicker();
   rateAddReset();
@@ -1680,7 +1695,7 @@ sform.onsubmit = async (e) => {
     const v = r.querySelector("input").value;
     rates[r.dataset.code] = v === "" ? 0 : parseFloat(v);
   });
-  rates.TWD = 1;
+  rates[baseCur()] = 1;
   // a currency that was picked and filled in but not added with "加入" is saved too, so nothing typed is lost
   const code = rateCode(), pending = parseFloat($("new-rate").value);
   if (code && pending > 0) {
@@ -1700,6 +1715,71 @@ sform.onsubmit = async (e) => {
     $("serr").textContent = String(err);
   }
 };
+
+/* ---------- main currency ---------- */
+// First start: pick the currency everything is shown in. Settings → 主要幣別 changes it later (stored amounts are converted).
+const basedlg = $("basedlg");
+let ddBase, baseMode = "first", baseAction = "";
+const guessBase = () => {
+  const l = (navigator.language || "").toLowerCase();
+  return l.startsWith("ja") ? "JPY" : l.startsWith("zh-cn") || l === "zh-hans-cn" ? "CNY" : l.startsWith("zh-hk") ? "HKD" : l.startsWith("ko") ? "KRW" : l.startsWith("th") ? "THB"
+    : l.startsWith("en-gb") ? "GBP" : l.startsWith("en") ? "USD" : "TWD";
+};
+function openBaseDialog(mode) {
+  baseMode = mode;
+  baseAction = "";
+  const first = mode === "first";
+  $("base-title").textContent = first ? "選擇你的主要幣別" : "更改主要幣別";
+  $("base-desc").textContent = first
+    ? "總資產、淨資產、目標、月報和記帳都會用這個幣別顯示；美元、日圓等外幣項目會依匯率折算進來。選好之後，隨時可以到「設定」→「主要幣別」更改。"
+    : "更改後，歷史月報、目標與記帳金額會按目前匯率換算成新幣別（會先自動備份）。";
+  $("base-ok").textContent = first ? "開始使用" : "確定更改";
+  $("base-cancel").hidden = first;
+  $("base-connect").hidden = !(first && isAndroid);
+  $("base-err").textContent = "";
+  $("base-hint").textContent = first ? "" : "只能選匯率清單裡已有的幣別；沒有想要的，請先到下方「匯率」加入。";
+  ddBase ??= new Dropdown($("base-pick"), (v) => { $("base-other").hidden = v !== "__other"; if (v === "__other") $("base-code").focus(); });
+  const codes = first ? CURRENCIES.map((c) => c[0]) : Object.keys(data.rates);
+  ddBase.setOptions([...codes.map((c) => ({ value: c, label: curLabel(c) })), ...(first ? [{ value: "__other", label: "其他幣別（自己輸入代碼）…" }] : [])], first ? guessBase() : baseCur());
+  $("base-other").hidden = true;
+  $("base-code").value = "";
+  basedlg.showModal();
+}
+basedlg.addEventListener("cancel", (e) => { if (baseMode === "first") e.preventDefault(); }); // the first choice cannot be skipped with Esc
+$("base-cancel").onclick = () => basedlg.close();
+$("base-connect").onclick = () => { baseAction = "connect"; basedlg.close(); };
+$("baseform").onsubmit = async (e) => {
+  e.preventDefault();
+  const code = ddBase.value === "__other" ? $("base-code").value.trim().toUpperCase() : ddBase.value;
+  const err = $("base-err");
+  if (!/^[A-Z]{2,5}$/.test(code)) return (err.textContent = "幣別代碼需為 2–5 個英文字母");
+  if (baseMode === "change") {
+    if (code === baseCur()) return basedlg.close();
+    const sub = `歷史月報、目標與記帳金額會按目前匯率換算，換算前已備份。${data.peer ? "你有綁定另一台裝置，那台也要改成同一個幣別，才能繼續同步。" : ""}`;
+    if (!(await confirmBox(`把主要幣別改成 ${curLabel(code)}？`, sub, "確定更改"))) return;
+  }
+  $("base-ok").disabled = true;
+  try {
+    data = await invoke("set_base", { code });
+    baseAction = "set";
+    basedlg.close();
+    render();
+    if (sdlg.open) fillSettingsRates();
+    if (baseMode === "change") toast(`主要幣別已改為 ${curLabel(code)}`);
+  } catch (ex) {
+    err.textContent = String(ex);
+  } finally {
+    $("base-ok").disabled = false;
+  }
+};
+$("base-change").onclick = () => openBaseDialog("change");
+let baseReady = Promise.resolve(); // other first-start prompts (update check, remote install) wait for the choice
+function baseFlow() {
+  return new Promise((res) => {
+    openBaseDialog("first");
+    basedlg.addEventListener("close", () => res(baseAction), { once: true });
+  });
+}
 
 /* ---------- quote sync ---------- */
 let refreshing = false, refreshTimer = 0, lastRefresh = 0;
@@ -2058,9 +2138,9 @@ function renderReport() {
     ? `<table class="rp-tbl"><thead><tr><th>標的</th><th>買入</th><th>賣出</th><th>已實現損益</th><th>配息</th></tr></thead><tbody>${rows.map(({ a, t, f }) =>
       `<tr><td>${esc(a.name)}</td><td class="${m}">${t.buy ? fmt0.format(t.buy * f) : "—"}</td><td class="${m}">${t.sell ? fmt0.format(t.sell * f) : "—"}</td>
         <td class="${m} ${t.sell ? (t.realized >= 0 ? "pos" : "neg") : ""}">${t.sell ? signed(t.realized * f) : "—"}</td><td class="${m}">${t.div ? fmt0.format(t.div * f) : "—"}</td></tr>`).join("")}
-      <tr><td><b>合計（TWD）</b></td><td class="${m}"><b>${fmt0.format(tot.buy)}</b></td><td class="${m}"><b>${fmt0.format(tot.sell)}</b></td><td class="${m}"><b>${tot.sell ? signed(tot.realized) : "—"}</b></td><td class="${m}"><b>${fmt0.format(tot.div)}</b></td></tr></tbody></table>`
+      <tr><td><b>合計（${esc(baseCur())}）</b></td><td class="${m}"><b>${fmt0.format(tot.buy)}</b></td><td class="${m}"><b>${fmt0.format(tot.sell)}</b></td><td class="${m}"><b>${tot.sell ? signed(tot.realized) : "—"}</b></td><td class="${m}"><b>${fmt0.format(tot.div)}</b></td></tr></tbody></table>`
     : '<p class="muted">這個月沒有買賣或配息記錄。</p>')
-    + (cur && data.assets.some((a) => a.holding && a.cost > 0) ? `<p class="hint">目前所有持倉的未實現損益：<b class="${unreal >= 0 ? "pos" : "neg"} ${m}">${signed(unreal)} TWD</b>（金額以目前匯率折算，買入含手續費）</p>` : "");
+    + (cur && data.assets.some((a) => a.holding && a.cost > 0) ? `<p class="hint">目前所有持倉的未實現損益：<b class="${unreal >= 0 ? "pos" : "neg"} ${m}">${signed(unreal)} ${esc(baseCur())}</b>（金額以目前匯率折算，買入含手續費）</p>` : "");
 
   // goals
   const goalAt = (g, date) => g.history.filter((p) => p.date <= date).at(-1);
@@ -2527,17 +2607,24 @@ async function boot() {
   data = await invoke("get_data");
   render();
   hideSplash();
+  let skipTour = false;
+  if (inTauri && data.base_set === false) { // brand-new install: choose the main currency before anything else
+    baseReady = baseFlow();
+    const how = await baseReady;
+    if (how === "connect") { skipTour = true; select("connect"); } // the phone will take the computer's currency when it syncs
+    else render();
+  }
   refreshPeer().then(() => syncPeer(false)); // on every start: is the bound device on? then sync
   scheduleRefresh();
   if (inTauri && data.refresh_sec > 0) doRefresh(false);
   runPlans(false).then(() => runDividends(false));
   setInterval(() => runPlans(false).then(() => runDividends(false)), 3600e3);
-  if (store.get(TOUR_KEY, "0") !== "1") setTimeout(startTour, 1200);
+  if (!skipTour && store.get(TOUR_KEY, "0") !== "1") setTimeout(startTour, 1200);
 }
 boot().catch((err) => { hideSplash(); toast(String(err)); });
 if (inTauri && !isAndroid) { // the phone app has no LAN server page, no cloudflared tunnel and no in-app updater
   invoke("get_sync").then(showPhone).catch(() => {});
-  setTimeout(() => checkUpdate(false), 4000);
-  setTimeout(offerRemoteInstall, 9000);
+  setTimeout(() => baseReady.then(() => checkUpdate(false)), 4000);
+  setTimeout(() => baseReady.then(offerRemoteInstall), 9000);
   setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
 }

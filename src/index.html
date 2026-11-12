@@ -259,7 +259,7 @@
     <div class="seg" id="f-kind"><button type="button" data-k="out" class="on">支出</button><button type="button" data-k="in">收入</button></div>
     <label>日期<input name="date" placeholder="YYYY-MM-DD" required autocomplete="off"></label>
     <div class="two">
-      <label>金額（NT$）<input name="amount" type="number" min="0" step="any" required></label>
+      <label>金額（<span class="b-sym">NT$</span>）<input name="amount" type="number" min="0" step="any" required></label>
       <div class="field">類別<div class="dd" id="ff-cat"></div></div>
     </div>
     <label>備註<input name="note" autocomplete="off"></label>
@@ -302,6 +302,12 @@
         <li>點進那個項目，按「＋ 記錄交易」輸入買入（日期、股數、成交價、手續費）。每月固定買入的，改用下面的「定期定額」。</li>
         <li>到總覽設定<b>目標</b>，MoneyPi 會依你資產成長的速度預估何時達成。</li>
       </ol>
+    </details>
+
+    <details class="help"><summary>主要幣別是什麼？</summary>
+      <p>第一次開啟時選的幣別就是<b>主要幣別</b>：總資產、淨資產、目標、月報和記帳都用它顯示；美元、日圓等外幣項目會依「設定」裡的匯率折算進來。</p>
+      <p>之後想換，到<b>「設定」→「主要幣別」→「更改」</b>。換的時候，歷史月報、目標和記帳金額會按目前匯率換算成新幣別（會先自動備份）。</p>
+      <p>電腦和手機要用<b>同一個主要幣別</b>才能同步；全新的手機連上電腦後，會自動沿用電腦的幣別。</p>
     </details>
 
     <details open class="help droid-only" hidden><summary>手機版怎麼用</summary>
@@ -470,8 +476,12 @@
     </div>
     <p class="hint">報價與匯率會同時抓取，間隔越短越即時；視窗隱藏或正在編輯時會自動暫停。</p>
 
-    <h4>匯率（1 單位折合台幣）</h4>
-    <p class="hint">用在外幣項目折算成台幣。按「同步」或開啟自動更新時，匯率會更新成最新值；手動改的數字下次更新會被覆蓋。</p>
+    <h4>主要幣別</h4>
+    <div class="row"><span id="base-now" class="base-now"></span><button type="button" id="base-change">更改</button></div>
+    <p class="hint">總資產、淨資產、目標、月報和記帳都用這個幣別顯示，外幣項目會依匯率折算。更改時，歷史月報、目標與記帳金額會按目前匯率換算（會先備份）。</p>
+
+    <h4>匯率（1 單位折合<span class="b-name">台幣</span>）</h4>
+    <p class="hint">用在外幣項目折算成<span class="b-name">台幣</span>。按「同步」或開啟自動更新時，匯率會更新成最新值；手動改的數字下次更新會被覆蓋。</p>
     <div id="rates"></div>
     <div class="rate-add">
       <div class="field">加入其他幣別<div class="dd" id="rate-pick"></div></div>
@@ -479,7 +489,7 @@
       <div class="rate-line">
         <span class="rl-l">1 <b id="new-cur">—</b> =</span>
         <input id="new-rate" type="number" min="0" step="any" inputmode="decimal" placeholder="匯率">
-        <span class="rl-r">台幣</span>
+        <span class="rl-r b-name">台幣</span>
       </div>
       <button type="button" class="primary rate-add-btn" id="rate-add-btn" disabled><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>加入這個幣別</button>
       <p class="hint" id="rate-hint"></p>
@@ -526,7 +536,7 @@
       <label>名稱<input name="name" required placeholder="財富自由、買跑車…" autocomplete="off"></label>
     </div>
     <div class="two">
-      <label>目標金額（TWD）<input name="amount" type="number" min="0" step="any" required></label>
+      <label>目標金額（<span class="b-code">TWD</span>）<input name="amount" type="number" min="0" step="any" required></label>
       <label>目標日期（選填）<input name="date" placeholder="YYYY-MM-DD" autocomplete="off"></label>
     </div>
     <div class="field">計算基準
@@ -601,6 +611,19 @@
       <button type="button" id="x-go" class="primary" hidden>還原</button>
       <button type="button" data-close>關閉</button>
     </menu>
+  </form>
+</dialog>
+
+<dialog id="basedlg" class="glass small">
+  <form method="dialog" id="baseform">
+    <h3 id="base-title">選擇你的主要幣別</h3>
+    <p class="muted" id="base-desc"></p>
+    <div class="field">主要幣別<div class="dd" id="base-pick"></div></div>
+    <label id="base-other" hidden>幣別代碼<input id="base-code" placeholder="例如 THB、IDR" maxlength="5" autocomplete="off"></label>
+    <p class="hint" id="base-hint"></p>
+    <p id="base-err" class="neg"></p>
+    <menu><button type="button" id="base-cancel" hidden>取消</button><button type="submit" class="primary" id="base-ok">開始使用</button></menu>
+    <button type="button" class="link droid-only" id="base-connect" hidden>已經有電腦版？先去連線，幣別會跟電腦一致</button>
   </form>
 </dialog>
 

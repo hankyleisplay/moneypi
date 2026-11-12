@@ -17,7 +17,8 @@ use tauri_plugin_opener::OpenerExt;
 #[cfg(desktop)]
 use tauri_plugin_updater::UpdaterExt;
 
-const BASE: &str = "TWD";
+/// Base currency of data files that predate the choice (and the default for a new install until one is picked).
+const DEFAULT_BASE: &str = "TWD";
 const DEFAULT_PORT: u16 = 8787;
 
 const INDEX_HTML: &str = include_str!("../../src/index.html");
@@ -123,7 +124,7 @@ struct Goal {
     /// Asset ids that count toward this goal; empty = total net worth.
     #[serde(default)]
     assets: Vec<u64>,
-    /// Daily progress values (TWD), used for the "when will I get there" estimate.
+    /// Daily progress values (base currency), used for the "when will I get there" estimate.
     #[serde(default)]
     history: Vec<GoalPoint>,
 }
@@ -159,7 +160,7 @@ struct Plan {
     status: String,
 }
 
-/// One income/expense entry of the bookkeeping ledger (always TWD).
+/// One income/expense entry of the bookkeeping ledger (in the base currency).
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Flow {
     #[serde(default)]
@@ -173,7 +174,7 @@ struct Flow {
     note: String,
 }
 
-/// Totals are stored in the base currency (TWD) at the rates in force on that day.
+/// Totals are stored in the base currency at the rates in force on that day.
 #[derive(Serialize, Deserialize, Clone)]
 struct Snapshot {
     date: String,
@@ -245,6 +246,12 @@ struct Data {
     /// IP address changed.
     #[serde(default)]
     install_id: String,
+    /// The main currency every total, goal and the ledger is shown in; foreign-currency items convert into it.
+    #[serde(default = "base_currency")]
+    base: String,
+    /// false only on a brand-new install, until the user has picked `base` (old data files count as picked: they are TWD).
+    #[serde(default = "yes")]
+    base_set: bool,
 }
 
 /// The device this one syncs with: where to reach it and the PIN it expects.
@@ -332,12 +339,14 @@ impl Default for Data {
             peer: None,
             device_name: String::new(),
             install_id: String::new(),
+            base: base_currency(),
+            base_set: false,
         }
     }
 }
 
 fn base_currency() -> String {
-    BASE.to_string()
+    DEFAULT_BASE.to_string()
 }
 fn default_port() -> u16 {
     DEFAULT_PORT
@@ -347,6 +356,64 @@ fn default_rates() -> BTreeMap<String, f64> {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect()
+}
+
+/// Rough value of one unit in USD. Only used to seed the rate list for a newly chosen base currency;
+/// the first quote refresh replaces these with live rates.
+const APPROX_USD: [(&str, f64); 14] = [
+    ("USD", 1.0),
+    ("TWD", 0.03125),
+    ("JPY", 0.00656),
+    ("EUR", 1.09375),
+    ("GBP", 1.27),
+    ("CNY", 0.1406),
+    ("HKD", 0.1281),
+    ("KRW", 0.00073),
+    ("AUD", 0.66),
+    ("CAD", 0.73),
+    ("SGD", 0.75),
+    ("THB", 0.028),
+    ("MYR", 0.21),
+    ("VND", 0.00004),
+];
+
+fn approx_usd(code: &str) -> Option<f64> {
+    APPROX_USD.iter().find(|(c, _)| *c == code).map(|(_, v)| *v)
+}
+
+/// The starter rate list for `base` (1 unit of each currency in `base`). `base_usd` is the live value of one `base` in USD
+/// when it is not in the built-in table.
+fn seed_rates(base: &str, base_usd: Option<f64>) -> BTreeMap<String, f64> {
+    if base == DEFAULT_BASE {
+        return default_rates();
+    }
+    let mut out = BTreeMap::new();
+    out.insert(base.to_string(), 1.0);
+    if let Some(b) = approx_usd(base).or(base_usd).filter(|b| *b > 0.0) {
+        for c in ["TWD", "USD", "JPY", "EUR", "CNY", "HKD"] {
+            if c != base {
+                out.insert(c.to_string(), approx_usd(c).unwrap_or(1.0) / b);
+            }
+        }
+    }
+    out
+}
+
+/// Round to `digits` significant digits (converted rates would otherwise show 15 digits of float noise).
+fn round_sig(v: f64, digits: i32) -> f64 {
+    if v == 0.0 || !v.is_finite() {
+        return v;
+    }
+    let m = 10f64.powi(digits - 1 - v.abs().log10().floor() as i32);
+    (v * m).round() / m
+}
+
+fn norm_code(code: &str) -> Result<String, String> {
+    let code = code.trim().to_uppercase();
+    if !(2..=5).contains(&code.len()) || !code.chars().all(|c| c.is_ascii_uppercase()) {
+        return Err("幣別代碼需為 2–5 個英文字母".into());
+    }
+    Ok(code)
 }
 
 fn today() -> String {
@@ -449,6 +516,17 @@ struct SyncPayload {
     rates: BTreeMap<String, f64>,
     #[serde(default)]
     stamps: BTreeMap<String, Stamp>,
+    /// Main currency of the sender; empty = an older version, which was always TWD.
+    #[serde(default)]
+    base: String,
+    /// The sender is a brand-new install that has not picked its main currency yet (it adopts the other side's).
+    #[serde(default)]
+    fresh: bool,
+}
+
+/// A brand-new install: no currency chosen yet and nothing entered.
+fn is_fresh(d: &Data) -> bool {
+    !d.base_set && d.assets.is_empty() && d.cashflow.is_empty() && d.goals.is_empty() && d.plans.is_empty()
 }
 
 fn sync_payload(d: &Data) -> SyncPayload {
@@ -460,6 +538,8 @@ fn sync_payload(d: &Data) -> SyncPayload {
         snapshots: d.snapshots.clone(),
         rates: d.rates.clone(),
         stamps: d.stamps.clone(),
+        base: d.base.clone(),
+        fresh: is_fresh(d),
     }
 }
 
@@ -1481,9 +1561,11 @@ impl Core {
         };
         let mut inc: Data = serde_json::from_str(text).map_err(|e| format!("備份檔格式錯誤：{e}"))?;
         migrate(&mut inc);
-        if inc.rates.get(BASE) != Some(&1.0) || inc.rates.values().any(|r| !r.is_finite() || *r <= 0.0) {
+        inc.base = norm_code(&inc.base).map_err(|_| "備份檔的主要幣別不正確".to_string())?;
+        if inc.rates.get(&inc.base) != Some(&1.0) || inc.rates.values().any(|r| !r.is_finite() || *r <= 0.0) {
             return Err("備份檔的匯率資料不正確".into());
         }
+        inc.base_set = true;
         for a in &inc.assets {
             validate_asset(a, &inc).map_err(|e| format!("備份檔中的「{}」：{e}", a.name))?;
         }
@@ -1869,8 +1951,9 @@ impl Core {
         rates: BTreeMap<String, f64>,
         refresh_sec: u32,
     ) -> Result<Value, String> {
-        if rates.get(BASE) != Some(&1.0) {
-            return Err("TWD 匯率必須為 1".into());
+        let base = self.data.lock().unwrap().base.clone();
+        if rates.get(&base) != Some(&1.0) {
+            return Err(format!("{base} 匯率必須為 1"));
         }
         if rates.values().any(|r| !r.is_finite() || *r <= 0.0) {
             return Err("匯率必須為正數".into());
@@ -1894,9 +1977,9 @@ impl Core {
     // ------------------------------------------------------------- quotes
 
     /// Fetch live prices for every holding with a symbol, plus FX rates for the
-    /// non-TWD currencies in use. Network I/O happens without holding the lock.
+    /// currencies other than the base in use. Network I/O happens without holding the lock.
     fn refresh_quotes(&self) -> Result<Value, String> {
-        let (targets, currencies) = {
+        let (targets, currencies, base) = {
             let d = self.data.lock().unwrap();
             let t: Vec<(u64, String, String)> = d
                 .assets
@@ -1904,8 +1987,8 @@ impl Core {
                 .filter(|a| a.holding && !a.market.is_empty() && !a.symbol.is_empty())
                 .map(|a| (a.id, a.symbol.clone(), a.market.clone()))
                 .collect();
-            let c: Vec<String> = d.rates.keys().filter(|k| *k != BASE).cloned().collect();
-            (t, c)
+            let c: Vec<String> = d.rates.keys().filter(|k| **k != d.base).cloned().collect();
+            (t, c, d.base.clone())
         };
 
         // Fetch in parallel (8 at a time): one slow Yahoo reply no longer holds up all the others.
@@ -1920,9 +2003,10 @@ impl Core {
         let mut fx: Vec<(String, f64)> = vec![];
         for chunk in currencies.chunks(8) {
             let part: Vec<Option<(String, f64)>> = thread::scope(|s| {
+                let base = &base;
                 let handles: Vec<_> = chunk
                     .iter()
-                    .map(|cur| s.spawn(move || fetch_yahoo(&format!("{cur}TWD=X")).ok().filter(|q| q.price > 0.0).map(|q| (cur.clone(), q.price))))
+                    .map(|cur| s.spawn(move || fetch_yahoo(&fx_symbol(cur, base)).ok().filter(|q| q.price > 0.0).map(|q| (cur.clone(), q.price))))
                     .collect();
                 handles.into_iter().map(|h| h.join().ok().flatten()).collect()
             });
@@ -1993,10 +2077,85 @@ impl Core {
     fn sync(&self, remote: SyncPayload) -> Result<Value, String> {
         let _guard = self.plan_lock.lock().unwrap(); // never in the middle of booking plans
         let mut d = self.data.lock().unwrap();
+        let remote_base = if remote.base.is_empty() { DEFAULT_BASE } else { remote.base.as_str() };
+        if is_fresh(&d) {
+            // a brand-new install takes over the other device's main currency and rate list
+            if remote_base != d.base || !remote.fresh {
+                d.base = remote_base.to_string();
+                d.rates = if remote.rates.get(remote_base) == Some(&1.0) { remote.rates.clone() } else { seed_rates(remote_base, None) };
+            }
+            if !remote.fresh {
+                d.base_set = true;
+            }
+        } else if remote_base != d.base {
+            if remote.fresh {
+                // the other side has nothing yet and will adopt our currency from this reply
+                return Ok(json!({ "changed": 0, "payload": sync_payload(&d) }));
+            }
+            return Err(format!("兩台裝置的主要幣別不同（{}與{}）。請先在其中一台的設定把主要幣別改成一樣，再同步。", d.base, remote_base));
+        }
         let base = d.peer.as_ref().map(|p| p.last_sync).unwrap_or(0); // last time we synced with that device
         let changed = merge_payload(&mut d, &remote, now_ms(), base);
         self.commit(&mut d)?;
         Ok(json!({ "changed": changed, "payload": sync_payload(&d) }))
+    }
+
+    /// Pick the main currency. On a new install that is just a choice; later it converts every stored amount that is
+    /// counted in the base currency (rates, daily totals, goals, ledger) at today's rates and keeps a copy of the old file.
+    fn set_base(&self, code: &str) -> Result<Value, String> {
+        let code = norm_code(code)?;
+        // a currency outside the built-in table needs its USD value, which comes from the network before taking any lock
+        let live_usd = if approx_usd(&code).is_none() {
+            fetch_yahoo(&format!("USD{code}=X")).ok().filter(|q| q.price.is_finite() && q.price > 0.0).map(|q| 1.0 / q.price)
+        } else {
+            None
+        };
+        let _guard = self.plan_lock.lock().unwrap();
+        let mut d = self.data.lock().unwrap();
+        if is_fresh(&d) {
+            d.rates = seed_rates(&code, live_usd);
+            d.base = code;
+            d.base_set = true;
+            self.commit(&mut d)?;
+            return Ok(view(&d));
+        }
+        if d.base == code {
+            if !d.base_set {
+                d.base_set = true; // already on this currency, just never confirmed
+                self.commit(&mut d)?;
+            }
+            return Ok(view(&d));
+        }
+        // units of the old base per 1 unit of the new one
+        let f = d
+            .rates
+            .get(&code)
+            .copied()
+            .or_else(|| Some(approx_usd(&code).or(live_usd)? / approx_usd(&d.base)?))
+            .filter(|f| f.is_finite() && *f > 0.0)
+            .ok_or_else(|| format!("還沒有 {code} 的匯率，請先在「設定」的匯率清單加入這個幣別"))?;
+        let _ = fs::copy(&self.path, self.path.with_extension("before-rebase.json"));
+        for r in d.rates.values_mut() {
+            *r = round_sig(*r / f, 9);
+        }
+        d.rates.insert(code.clone(), 1.0);
+        for s in d.snapshots.iter_mut() {
+            s.assets /= f;
+            s.liabilities /= f;
+        }
+        for g in d.goals.iter_mut() {
+            g.amount /= f;
+            for p in g.history.iter_mut() {
+                p.value /= f;
+            }
+        }
+        for fl in d.cashflow.iter_mut() {
+            fl.amount /= f;
+        }
+        d.base = code;
+        d.base_set = true;
+        self.commit(&mut d)?;
+        Ok(view(&d))
     }
 
     fn my_name(&self) -> String {
@@ -2226,7 +2385,7 @@ impl Core {
             let mut a = Asset {
                 name: get(0),
                 category: if get(1).is_empty() { "其他".into() } else { get(1) },
-                currency: if get(2).is_empty() { base_currency() } else { get(2).to_uppercase() },
+                currency: if get(2).is_empty() { d.base.clone() } else { get(2).to_uppercase() },
                 value: num(3)?,
                 liability: matches!(get(4).as_str(), "是" | "true" | "TRUE" | "1" | "yes"),
                 note: get(5),
@@ -2609,16 +2768,18 @@ fn fetch_yahoo(symbol: &str) -> Result<Quote, String> {
     Ok(Quote { price, currency })
 }
 
-/// Live rate of one currency in TWD (Yahoo "USDTWD=X"), for the "add a currency" form.
-fn rate_quote(code: &str) -> Result<Value, String> {
-    let code = code.trim().to_uppercase();
-    if !(2..=5).contains(&code.len()) || !code.chars().all(|c| c.is_ascii_uppercase()) {
-        return Err("幣別代碼需為 2–5 個英文字母".into());
-    }
-    if code == BASE {
+/// Yahoo symbol for "how many `base` is one `cur` worth", e.g. USDTWD=X.
+fn fx_symbol(cur: &str, base: &str) -> String {
+    format!("{cur}{base}=X")
+}
+
+/// Live rate of one currency in the base currency (Yahoo "USDTWD=X"), for the "add a currency" form.
+fn rate_quote(code: &str, base: &str) -> Result<Value, String> {
+    let code = norm_code(code)?;
+    if code == base {
         return Ok(json!({ "code": code, "rate": 1.0 }));
     }
-    let q = fetch_yahoo(&format!("{code}TWD=X")).map_err(|e| format!("抓不到 {code} 的即時匯率（{e}）"))?;
+    let q = fetch_yahoo(&fx_symbol(&code, base)).map_err(|e| format!("抓不到 {code} 的即時匯率（{e}）"))?;
     if !q.price.is_finite() || q.price <= 0.0 {
         return Err(format!("{code} 沒有可用的匯率"));
     }
@@ -2859,7 +3020,11 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "pair_peer" if !remote => core.pair_peer(&arg::<String>(&args, "link")?, args["pin"].as_str().unwrap_or("")),
         "sync_peer" if !remote => core.sync_peer(),
         "unpair_peer" if !remote => Ok(core.unpair_peer()),
-        "rate_quote" if !remote => rate_quote(&arg::<String>(&args, "code")?),
+        "rate_quote" if !remote => {
+            let base = core.data.lock().unwrap().base.clone();
+            rate_quote(&arg::<String>(&args, "code")?, &base)
+        }
+        "set_base" if !remote => core.set_base(&arg::<String>(&args, "code")?),
         "import_tracker" => core.import_tracker(&arg::<String>(&args, "text")?),
         "import_history" => core.import_history(&arg::<String>(&args, "text")?),
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
@@ -3310,8 +3475,8 @@ mod tests {
         assert_eq!(off.refresh_sec, 0, "an old file without the setting stays off");
         assert!(!serde_json::to_string(&d).unwrap().contains("refresh_min"));
         let core = temp_core("settings");
-        assert!(core.set_settings([(BASE.to_string(), 1.0)].into(), 7).is_err(), "unsupported interval");
-        assert!(core.set_settings([(BASE.to_string(), 1.0)].into(), 15).is_ok());
+        assert!(core.set_settings([("TWD".to_string(), 1.0)].into(), 7).is_err(), "unsupported interval");
+        assert!(core.set_settings([("TWD".to_string(), 1.0)].into(), 15).is_ok());
         assert_eq!(core.data.lock().unwrap().refresh_sec, 15);
     }
 
@@ -3750,6 +3915,119 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------------- main currency
+
+    #[test]
+    fn a_new_install_asks_for_the_currency_but_old_files_count_as_chosen() {
+        let fresh = Data::default();
+        assert_eq!((fresh.base.as_str(), fresh.base_set), ("TWD", false));
+        let old: Data = serde_json::from_str(r#"{"next_id":0,"assets":[],"snapshots":[]}"#).unwrap();
+        assert_eq!((old.base.as_str(), old.base_set), ("TWD", true), "no prompt for people who already use the app");
+    }
+
+    #[test]
+    fn choosing_a_currency_on_a_new_install_seeds_rates_around_it() {
+        let c = Arc::new(temp_core("basejpy"));
+        let v = dispatch(&c, "set_base", json!({ "code": " jpy " }), false).unwrap();
+        assert_eq!(v["base"], "JPY");
+        assert_eq!(v["base_set"], true);
+        let d = c.data.lock().unwrap();
+        assert_eq!(d.rates["JPY"], 1.0);
+        assert!((d.rates["TWD"] - 0.03125 / 0.00656 as f64).abs() < 1e-9, "TWD is worth ~4.76 yen");
+        assert!(d.rates.contains_key("USD") && d.rates.contains_key("EUR"));
+        drop(d);
+        // the rate form and the settings check now use JPY as the one
+        assert!(c.set_settings([("TWD".to_string(), 1.0)].into(), 15).is_err());
+        let ok: BTreeMap<String, f64> = [("JPY".to_string(), 1.0), ("USD".to_string(), 150.0)].into();
+        assert!(c.set_settings(ok, 15).is_ok());
+        assert_eq!(rate_quote("jpy", "JPY").unwrap()["rate"], 1.0);
+        assert_eq!(fx_symbol("USD", "JPY"), "USDJPY=X");
+        assert!(dispatch(&c, "set_base", json!({ "code": "x" }), false).is_err());
+    }
+
+    #[test]
+    fn changing_the_currency_later_converts_stored_totals_and_keeps_a_copy() {
+        let c = Arc::new(temp_core("rebase"));
+        dispatch(&c, "set_base", json!({ "code": "TWD" }), false).unwrap();
+        save(&c, cash("銀行", 3200.0));
+        save(&c, json!({ "name": "美金", "category": "現金", "currency": "USD", "value": 100.0 }));
+        dispatch(&c, "add_flow", json!({ "flow": { "date": "2026-11-01", "kind": "out", "category": "餐飲", "amount": 320.0 } }), false).unwrap();
+        dispatch(&c, "save_goal", json!({ "goal": { "name": "目標", "amount": 6400.0 } }), false).unwrap();
+        let usd_rate = c.data.lock().unwrap().rates["USD"]; // TWD per USD (32)
+        let before = c.data.lock().unwrap().snapshots.last().unwrap().assets;
+        let v = dispatch(&c, "set_base", json!({ "code": "USD" }), false).unwrap();
+        assert_eq!(v["base"], "USD");
+        let d = c.data.lock().unwrap();
+        assert_eq!(d.rates["USD"], 1.0);
+        assert!((d.rates["TWD"] - 1.0 / usd_rate).abs() < 1e-9);
+        assert_eq!(round_sig(4.761904761904762, 9), 4.76190476);
+        assert_eq!(d.assets.iter().find(|a| a.name == "銀行").unwrap().value, 3200.0, "an item keeps its own currency and amount");
+        assert!((d.cashflow[0].amount - 320.0 / usd_rate).abs() < 1e-9);
+        assert!((d.goals[0].amount - 6400.0 / usd_rate).abs() < 1e-9);
+        assert!((d.snapshots.last().unwrap().assets - before / usd_rate).abs() < 1e-6);
+        drop(d);
+        // and back again lands on the original numbers
+        dispatch(&c, "set_base", json!({ "code": "TWD" }), false).unwrap();
+        let d = c.data.lock().unwrap();
+        assert!((d.cashflow[0].amount - 320.0).abs() < 1e-6);
+        assert!((d.rates["USD"] - usd_rate).abs() < 1e-9);
+        assert!(c.path.with_extension("before-rebase.json").exists());
+        // a currency with no rate yet and not in the built-in list is refused rather than guessed
+        drop(d);
+        assert!(c.set_base("ZZZ").is_err());
+    }
+
+    #[test]
+    fn two_devices_with_different_main_currencies_do_not_mix() {
+        let (pc, phone) = pair();
+        for c in [&pc, &phone] {
+            dispatch(c, "set_base", json!({ "code": "TWD" }), false).unwrap();
+        }
+        save(&pc, cash("電腦存款", 100.0));
+        save(&phone, cash("手機存款", 5.0));
+        dispatch(&phone, "set_base", json!({ "code": "JPY" }), false).unwrap();
+        let before = names(&pc);
+        let pa = sync_payload(&pc.data.lock().unwrap());
+        let err = phone.sync(pa).err().unwrap();
+        assert!(err.contains("主要幣別不同"), "{err}");
+        assert_eq!(names(&phone), vec!["手機存款".to_string()], "nothing was merged");
+        assert_eq!(names(&pc), before);
+        // same currency again: they sync
+        dispatch(&phone, "set_base", json!({ "code": "TWD" }), false).unwrap();
+        exchange(&pc, &phone);
+        assert_eq!(names(&phone).len(), 2);
+    }
+
+    #[test]
+    fn a_fresh_phone_adopts_the_computers_currency_and_does_not_disturb_it() {
+        let (pc, phone) = pair();
+        dispatch(&pc, "set_base", json!({ "code": "JPY" }), false).unwrap();
+        save(&pc, json!({ "name": "日圓存款", "category": "銀行存款", "currency": "JPY", "value": 5000.0 }));
+        assert!(phone.data.lock().unwrap().base_set == false);
+        let pc_rates = pc.data.lock().unwrap().rates.clone();
+        // phone connects first: its payload says it is fresh, so the computer keeps its own rates and currency
+        let (a, b) = exchange(&phone, &pc);
+        assert_eq!(a, 0, "nothing was changed on the computer");
+        let _ = b;
+        assert_eq!(pc.data.lock().unwrap().base, "JPY");
+        assert_eq!(pc.data.lock().unwrap().rates, pc_rates);
+        let d = phone.data.lock().unwrap();
+        assert_eq!((d.base.as_str(), d.base_set), ("JPY", true));
+        assert_eq!(d.rates, pc_rates);
+        assert_eq!(d.assets.len(), 1);
+    }
+
+    #[test]
+    fn an_older_peer_without_a_currency_counts_as_twd() {
+        let (pc, phone) = pair();
+        save(&pc, cash("存款", 1.0));
+        let mut p = sync_payload(&pc.data.lock().unwrap());
+        p.base = String::new();
+        p.fresh = false;
+        assert!(phone.sync(p).is_ok());
+        assert_eq!(phone.data.lock().unwrap().base, "TWD");
+    }
+
     #[test]
     fn a_delete_on_one_side_is_not_undone_when_only_that_side_changed() {
         let (pc, phone) = pair();
@@ -3786,10 +4064,10 @@ mod tests {
     #[test]
     fn rate_quote_checks_the_code_before_it_goes_to_the_network() {
         for bad in ["", "U", "usd1", "USDXYZ", "US D", "../../x", "€"] {
-            assert!(rate_quote(bad).is_err(), "{bad:?}");
+            assert!(rate_quote(bad, "TWD").is_err(), "{bad:?}");
         }
-        assert_eq!(rate_quote(" twd ").unwrap()["rate"], 1.0);
-        assert_eq!(rate_quote("twd").unwrap()["code"], "TWD");
+        assert_eq!(rate_quote(" twd ", "TWD").unwrap()["rate"], 1.0);
+        assert_eq!(rate_quote("twd", "TWD").unwrap()["code"], "TWD");
     }
 
 
