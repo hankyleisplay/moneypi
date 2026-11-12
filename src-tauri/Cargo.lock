@@ -2249,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "moneypi"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",

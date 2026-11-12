@@ -1139,6 +1139,15 @@ fn winget_available() -> bool {
     })
 }
 
+/// The APK of one of this project's own releases (what the phone's update notice offers to download).
+fn is_release_apk(u: &str) -> bool {
+    u.starts_with("https://github.com/hankyleisplay/moneypi/releases/download/v")
+        && u.ends_with(".apk")
+        && u.len() < 200
+        && u.chars().all(|c| c.is_ascii_alphanumeric() || "-._/:".contains(c))
+        && !u.contains("..")
+}
+
 /// Only known official research pages and the existing installation guide may be opened.
 fn external_url(target: &str) -> Result<&str, String> {
     match target {
@@ -1148,6 +1157,8 @@ fn external_url(target: &str) -> Result<&str, String> {
         | "https://investor.vanguard.com/investment-products/etfs/profile/vt"
         | "https://investor.vanguard.com/investment-products/etfs/profile/voo"
         | "https://investor.tsmc.com/chinese" => Ok(target),
+        "update" => Ok("https://github.com/hankyleisplay/moneypi/releases/latest"),
+        t if is_release_apk(t) => Ok(t),
         _ => Err("不支援的項目".into()),
     }
 }
@@ -3282,10 +3293,48 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     upd.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
     app.restart()
 }
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/hankyleisplay/moneypi/releases/latest";
+
+/// "v0.21.1" / "0.21.1" -> (0, 21, 1); anything else is not a version.
+fn version_tuple(v: &str) -> Option<(u64, u64, u64)> {
+    let mut it = v.trim().trim_start_matches('v').split('.').map(|p| p.parse::<u64>().ok());
+    let t = (it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(t)
+}
+
+/// If the latest GitHub release is newer than `current` and already has its APK attached, describe it for the update notice.
+/// (The APK is attached a few minutes after the release goes public, so an APK-less release is not offered yet.)
+#[cfg_attr(not(mobile), allow(dead_code))]
+fn release_update(release: &Value, current: &str) -> Option<Value> {
+    if release["draft"].as_bool() == Some(true) || release["prerelease"].as_bool() == Some(true) {
+        return None;
+    }
+    let tag = release["tag_name"].as_str()?;
+    if version_tuple(tag)? <= version_tuple(current)? {
+        return None;
+    }
+    let url = release["assets"].as_array()?.iter().filter_map(|a| a["browser_download_url"].as_str()).find(|u| is_release_apk(u))?;
+    Some(json!({ "version": tag.trim_start_matches('v'), "notes": release["body"].as_str().unwrap_or(""), "url": url }))
+}
+
 #[cfg(mobile)]
 #[tauri::command]
 async fn check_update(_app: AppHandle) -> Result<Value, String> {
-    Ok(Value::Null) // the phone app is updated by installing a newer APK
+    // The phone cannot install an update by itself (Android does not allow that): it only looks for a newer release and
+    // offers its APK for download. Nothing about the user is sent besides the plain request.
+    tauri::async_runtime::spawn_blocking(|| {
+        let v: Value = ureq::get(LATEST_RELEASE_API)
+            .set("Accept", "application/vnd.github+json")
+            .set("User-Agent", "MoneyPi")
+            .timeout(Duration::from_secs(10))
+            .call()
+            .map_err(|_| "連不上 GitHub，請確認網路".to_string())?
+            .into_json()
+            .map_err(|_| "GitHub 回應格式錯誤".to_string())?;
+        Ok(release_update(&v, env!("CARGO_PKG_VERSION")).unwrap_or(Value::Null))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[cfg(mobile)]
 #[tauri::command]
@@ -4026,6 +4075,51 @@ mod tests {
         p.fresh = false;
         assert!(phone.sync(p).is_ok());
         assert_eq!(phone.data.lock().unwrap().base, "TWD");
+    }
+
+    // ------------------------------------------------------------- phone update notice
+
+    #[test]
+    fn versions_compare_by_number_not_by_text() {
+        assert_eq!(version_tuple("v0.21.1"), Some((0, 21, 1)));
+        assert!(version_tuple("0.9.0") < version_tuple("0.21.0"), "0.9 is older than 0.21");
+        for bad in ["", "v1", "1.2", "1.2.3.4", "1.2.x", "latest", "v-1.0.0"] {
+            assert_eq!(version_tuple(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_update_notice_only_offers_a_newer_release_that_already_has_its_apk() {
+        let apk = "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/MoneyPi_0.21.1_android.apk";
+        let rel = |tag: &str, assets: Value| json!({ "tag_name": tag, "body": "notes", "draft": false, "prerelease": false, "assets": assets });
+        let with_apk = json!([{ "name": "x.exe", "browser_download_url": "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/x.exe" }, { "browser_download_url": apk }]);
+        let u = release_update(&rel("v0.21.1", with_apk.clone()), "0.21.0").unwrap();
+        assert_eq!((u["version"].as_str(), u["url"].as_str(), u["notes"].as_str()), (Some("0.21.1"), Some(apk), Some("notes")));
+        assert!(release_update(&rel("v0.21.0", with_apk.clone()), "0.21.0").is_none(), "same version");
+        assert!(release_update(&rel("v0.20.9", with_apk.clone()), "0.21.0").is_none(), "older");
+        assert!(release_update(&rel("v0.21.1", json!([])), "0.21.0").is_none(), "APK not attached yet");
+        assert!(release_update(&json!({ "tag_name": "v0.22.0", "draft": true, "assets": with_apk }), "0.21.0").is_none());
+        assert!(release_update(&json!({ "tag_name": "v0.22.0", "prerelease": true, "assets": with_apk }), "0.21.0").is_none());
+        assert!(release_update(&json!({ "message": "rate limited" }), "0.21.0").is_none());
+        let evil = json!([{ "browser_download_url": "https://evil.example/MoneyPi.apk" }]);
+        assert!(release_update(&rel("v0.22.0", evil), "0.21.0").is_none(), "only this project's own APK");
+    }
+
+    #[test]
+    fn only_this_projects_release_apks_can_be_opened_from_the_update_notice() {
+        let good = "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/MoneyPi_0.21.1_android.apk";
+        assert_eq!(external_url(good), Ok(good));
+        assert_eq!(external_url("update"), Ok("https://github.com/hankyleisplay/moneypi/releases/latest"));
+        for bad in [
+            "https://github.com/other/moneypi/releases/download/v0.21.1/a.apk",
+            "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/a.exe",
+            "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/a.apk?x=1",
+            "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/../../../x.apk",
+            "https://github.com.evil.example/hankyleisplay/moneypi/releases/download/v1/a.apk",
+            "http://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/a.apk",
+        ] {
+            assert!(external_url(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

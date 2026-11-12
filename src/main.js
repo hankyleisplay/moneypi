@@ -1927,7 +1927,7 @@ $("import-file").onchange = async (e) => {
   }
 };
 
-/* ---------- auto update (desktop only) ---------- */
+/* ---------- update notice (desktop: installs it; phone: offers the new APK for download) ---------- */
 let pendingUpdate = null;
 async function checkUpdate(manual) {
   if (!inTauri) return;
@@ -1937,10 +1937,12 @@ async function checkUpdate(manual) {
     const u = await window.__TAURI__.core.invoke("check_update");
     if (u) {
       pendingUpdate = u;
+      const act = isAndroid ? "下載新版" : "立即更新";
       $("update-text").textContent = `發現新版本 v${u.version}`;
+      $("update-now").textContent = act;
       $("update-bar").hidden = false;
-      st.textContent = `發現新版本 v${u.version}，按下「立即更新」安裝`;
-      btn.textContent = "立即更新";
+      st.textContent = `發現新版本 v${u.version}，按下「${act}」${isAndroid ? "，用瀏覽器下載後點開安裝" : "安裝"}`;
+      btn.textContent = act;
     } else if (manual) {
       st.textContent = `✓ 目前已是最新版本（${$("ver").textContent.replace("目前版本 ", "")}）`;
       btn.textContent = "檢查更新";
@@ -1952,6 +1954,15 @@ async function checkUpdate(manual) {
   }
 }
 async function installUpdate() {
+  if (isAndroid) { // Android will not let an app install itself: hand the APK link to the browser, the user taps it to install
+    try {
+      await invoke("open_external", { target: pendingUpdate.url });
+      $("update-bar").hidden = true;
+      $("upd-status").textContent = "已交給瀏覽器下載。下載完成後點開 APK 安裝（第一次可能要允許「安裝未知來源的應用程式」），資料會保留。";
+      toast("已開始下載新版，完成後點開安裝");
+    } catch (err) { toast("無法開啟下載連結：" + err); }
+    return;
+  }
   $("update-now").disabled = $("upd-btn").disabled = true;
   $("update-text").textContent = "下載並安裝中，完成後會自動重新啟動…";
   $("upd-status").textContent = "下載並安裝中，完成後會自動重新啟動…";
@@ -2622,7 +2633,11 @@ async function boot() {
   if (!skipTour && store.get(TOUR_KEY, "0") !== "1") setTimeout(startTour, 1200);
 }
 boot().catch((err) => { hideSplash(); toast(String(err)); });
-if (inTauri && !isAndroid) { // the phone app has no LAN server page, no cloudflared tunnel and no in-app updater
+if (isAndroid) { // the phone looks for a newer release now and then and offers its APK
+  setTimeout(() => baseReady.then(() => checkUpdate(false)), 6000);
+  setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
+}
+if (inTauri && !isAndroid) { // the phone app has no LAN server page, no cloudflared tunnel and no self-installing updater
   invoke("get_sync").then(showPhone).catch(() => {});
   setTimeout(() => baseReady.then(() => checkUpdate(false)), 4000);
   setTimeout(() => baseReady.then(offerRemoteInstall), 9000);
