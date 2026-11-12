@@ -1663,6 +1663,7 @@ $("refresh-seg").onclick = (e) => {
 };
 
 function fillSettingsRates() {
+  renderChannel();
   applyBaseLabels();
   $("base-now").textContent = curLabel(baseCur());
   $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
@@ -1677,7 +1678,8 @@ async function openSettings() {
   sdlg.showModal();
   if (inTauri) {
     try {
-      $("ver").textContent = "目前版本 v" + (await window.__TAURI__.core.invoke("app_version"));
+      appVer = await window.__TAURI__.core.invoke("app_version");
+      $("ver").textContent = `目前版本 v${appVer}${appVer.includes("-") ? "（預覽版）" : ""}`;
     } catch (e) { $("upd-status").textContent = String(e); }
   }
 }
@@ -1927,8 +1929,8 @@ $("import-file").onchange = async (e) => {
   }
 };
 
-/* ---------- auto update (desktop only) ---------- */
-let pendingUpdate = null;
+/* ---------- update notice (desktop: installs it; phone: offers the new APK for download) ---------- */
+let pendingUpdate = null, appVer = "";
 async function checkUpdate(manual) {
   if (!inTauri) return;
   const st = $("upd-status"), btn = $("upd-btn");
@@ -1937,12 +1939,14 @@ async function checkUpdate(manual) {
     const u = await window.__TAURI__.core.invoke("check_update");
     if (u) {
       pendingUpdate = u;
-      $("update-text").textContent = `發現新版本 v${u.version}`;
+      const act = isAndroid ? "下載新版" : "立即更新", tag = u.preview ? "（預覽版）" : "";
+      $("update-text").textContent = `發現新版本 v${u.version}${tag}`;
+      $("update-now").textContent = act;
       $("update-bar").hidden = false;
-      st.textContent = `發現新版本 v${u.version}，按下「立即更新」安裝`;
-      btn.textContent = "立即更新";
+      st.textContent = `發現新版本 v${u.version}${tag}，按下「${act}」${isAndroid ? "，用瀏覽器下載後點開安裝" : "安裝"}`;
+      btn.textContent = act;
     } else if (manual) {
-      st.textContent = `✓ 目前已是最新版本（${$("ver").textContent.replace("目前版本 ", "")}）`;
+      st.textContent = `✓ 目前已是最新版本（v${appVer}）`;
       btn.textContent = "檢查更新";
     }
   } catch (err) {
@@ -1952,6 +1956,15 @@ async function checkUpdate(manual) {
   }
 }
 async function installUpdate() {
+  if (isAndroid) { // Android will not let an app install itself: hand the APK link to the browser, the user taps it to install
+    try {
+      await invoke("open_external", { target: pendingUpdate.url });
+      $("update-bar").hidden = true;
+      $("upd-status").textContent = "已交給瀏覽器下載。下載完成後點開 APK 安裝（第一次可能要允許「安裝未知來源的應用程式」），資料會保留。";
+      toast("已開始下載新版，完成後點開安裝");
+    } catch (err) { toast("無法開啟下載連結：" + err); }
+    return;
+  }
   $("update-now").disabled = $("upd-btn").disabled = true;
   $("update-text").textContent = "下載並安裝中，完成後會自動重新啟動…";
   $("upd-status").textContent = "下載並安裝中，完成後會自動重新啟動…";
@@ -1963,6 +1976,29 @@ async function installUpdate() {
     toast("更新失敗：" + err);
   }
 }
+// update channel: stable (default) or preview (early builds). A device setting, not synced.
+const CHAN_HINT = {
+  stable: "穩定版：只收到經過測試、正式發布的版本（建議）。",
+  preview: "預覽版：會比穩定版更早收到新功能，但可能還有沒修好的問題，資料格式也可能調整，建議先匯出備份。有新的穩定版時也會一併提醒。切回「穩定版」不會自動降版：要等穩定版超過目前版本才會再提醒；想退回舊版需要重新安裝（先匯出備份）。",
+};
+function renderChannel() {
+  const c = data.channel === "preview" ? "preview" : "stable";
+  [...$("chan-seg").children].forEach((b) => b.classList.toggle("on", b.dataset.c === c));
+  $("chan-hint").textContent = CHAN_HINT[c];
+}
+$("chan-seg").onclick = async (e) => {
+  const b = e.target.closest("button");
+  if (!b || b.dataset.c === (data.channel || "stable")) return;
+  if (b.dataset.c === "preview" && !(await confirmBox("改用預覽版？", "預覽版會比穩定版更早收到新功能，但可能還有沒修好的問題，資料格式也可能調整。建議先匯出備份。隨時可以切回穩定版。", "改用預覽版"))) return;
+  try {
+    data = await invoke("set_channel", { channel: b.dataset.c });
+    renderChannel();
+    pendingUpdate = null;
+    $("update-bar").hidden = true;
+    $("upd-btn").textContent = "檢查更新";
+    checkUpdate(true); // look right away on the new channel
+  } catch (err) { $("upd-status").textContent = "無法切換頻道：" + err; }
+};
 $("update-later").onclick = () => ($("update-bar").hidden = true);
 $("update-now").onclick = installUpdate;
 $("upd-btn").onclick = () => (pendingUpdate ? installUpdate() : checkUpdate(true));
@@ -2622,7 +2658,11 @@ async function boot() {
   if (!skipTour && store.get(TOUR_KEY, "0") !== "1") setTimeout(startTour, 1200);
 }
 boot().catch((err) => { hideSplash(); toast(String(err)); });
-if (inTauri && !isAndroid) { // the phone app has no LAN server page, no cloudflared tunnel and no in-app updater
+if (isAndroid) { // the phone looks for a newer release now and then and offers its APK
+  setTimeout(() => baseReady.then(() => checkUpdate(false)), 6000);
+  setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
+}
+if (inTauri && !isAndroid) { // the phone app has no LAN server page, no cloudflared tunnel and no self-installing updater
   invoke("get_sync").then(showPhone).catch(() => {});
   setTimeout(() => baseReady.then(() => checkUpdate(false)), 4000);
   setTimeout(() => baseReady.then(offerRemoteInstall), 9000);
