@@ -310,6 +310,11 @@
       <p>電腦和手機要用<b>同一個主要幣別</b>才能同步；全新的手機連上電腦後，會自動沿用電腦的幣別。</p>
     </details>
 
+    <details class="help peer-only" hidden><summary>更新與「預覽版」頻道</summary>
+      <p>到<b>「設定」→「版本」</b>可以檢查更新，也能選<b>更新頻道</b>：<b>穩定版</b>（預設，只收到正式發布的版本）或<b>預覽版</b>（提早試用新功能，但可能還有沒修好的問題）。</p>
+      <p>選預覽版之後，有新的預覽版或新的穩定版都會提醒你；選項只影響這台裝置，不會同步到另一台。切回穩定版不會自動降版，想退回舊版需要重新安裝，所以選預覽版前請先匯出備份。</p>
+    </details>
+
     <details open class="help droid-only" hidden><summary>手機版怎麼用</summary>
       <p><b>資料存在這支手機裡。</b>不用電腦、不用網路，也能新增項目、記帳、記錄交易、看總覽與月報。</p>
       <p><b>和電腦版的差別：</b>密碼鎖、自動備份資料夾、遠端連線是電腦版才有的功能；定期定額與配息由電腦負責記入，手機會在同步時收到結果。</p>
@@ -500,6 +505,9 @@
       <h4>版本</h4>
       <div class="row"><span id="ver" class="muted"></span><button type="button" id="upd-btn">檢查更新</button></div>
       <p class="hint" id="upd-status"></p>
+      <div class="row"><span class="muted">更新頻道</span>
+        <div class="seg" id="chan-seg"><button type="button" data-c="stable">穩定版</button><button type="button" data-c="preview">預覽版</button></div></div>
+      <p class="hint" id="chan-hint"></p>
     </div>
 
     <h4>關於</h4>

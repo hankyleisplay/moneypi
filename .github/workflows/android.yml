@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version, e.g. 0.20.0 (must match tauri.conf.json, package.json and Cargo.toml)"
+        description: "Version, e.g. 0.20.0 or a preview 0.22.0-preview.1 (must match tauri.conf.json, package.json and Cargo.toml)"
         required: true
   workflow_call:
     inputs:
@@ -98,8 +98,16 @@ jobs:
           # the generated project ships Tauri's own launcher icon; replace it with MoneyPi's (made from src-tauri/icons/icon.png)
           cp -r src-tauri/android-res/. src-tauri/gen/android/app/src/main/res/
 
+      # Tauri derives versionCode from major.minor.patch only, which would give a preview and its stable release the same code.
+      # version.mjs makes it grow with every release and puts a stable release above its previews (see the comments there).
       - name: Build the APK (64-bit and 32-bit phones)
-        run: npx tauri android build --apk --target aarch64 --target armv7 --ci
+        run: |
+          set -euo pipefail
+          node .github/scripts/version.mjs valid "$VERSION" || { echo "::error::version must look like 0.22.0 or 0.22.0-preview.1"; exit 1; }
+          VC=$(node .github/scripts/version.mjs code "$VERSION")
+          echo "VERSION_CODE=$VC" >> "$GITHUB_ENV"
+          echo "versionCode $VC for $VERSION"
+          npx tauri android build --apk --target aarch64 --target armv7 --ci --config "{\"bundle\":{\"android\":{\"versionCode\":$VC}}}"
 
       - name: Sign, align and verify
         env:
@@ -122,6 +130,7 @@ jobs:
           # the app must carry the version we are releasing
           "$BT/aapt2" dump badging "$OUT" | grep -E "^package:" | tee "$RUNNER_TEMP/badging.txt"
           grep -q "versionName='$VERSION'" "$RUNNER_TEMP/badging.txt" || { echo "::error::APK versionName is not $VERSION"; exit 1; }
+          grep -q "versionCode='$VERSION_CODE'" "$RUNNER_TEMP/badging.txt" || { echo "::error::APK versionCode is not $VERSION_CODE"; exit 1; }
 
       - uses: actions/upload-artifact@v6
         with:

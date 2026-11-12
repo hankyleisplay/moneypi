@@ -1663,6 +1663,7 @@ $("refresh-seg").onclick = (e) => {
 };
 
 function fillSettingsRates() {
+  renderChannel();
   applyBaseLabels();
   $("base-now").textContent = curLabel(baseCur());
   $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
@@ -1677,7 +1678,8 @@ async function openSettings() {
   sdlg.showModal();
   if (inTauri) {
     try {
-      $("ver").textContent = "目前版本 v" + (await window.__TAURI__.core.invoke("app_version"));
+      appVer = await window.__TAURI__.core.invoke("app_version");
+      $("ver").textContent = `目前版本 v${appVer}${appVer.includes("-") ? "（預覽版）" : ""}`;
     } catch (e) { $("upd-status").textContent = String(e); }
   }
 }
@@ -1928,7 +1930,7 @@ $("import-file").onchange = async (e) => {
 };
 
 /* ---------- update notice (desktop: installs it; phone: offers the new APK for download) ---------- */
-let pendingUpdate = null;
+let pendingUpdate = null, appVer = "";
 async function checkUpdate(manual) {
   if (!inTauri) return;
   const st = $("upd-status"), btn = $("upd-btn");
@@ -1937,14 +1939,14 @@ async function checkUpdate(manual) {
     const u = await window.__TAURI__.core.invoke("check_update");
     if (u) {
       pendingUpdate = u;
-      const act = isAndroid ? "下載新版" : "立即更新";
-      $("update-text").textContent = `發現新版本 v${u.version}`;
+      const act = isAndroid ? "下載新版" : "立即更新", tag = u.preview ? "（預覽版）" : "";
+      $("update-text").textContent = `發現新版本 v${u.version}${tag}`;
       $("update-now").textContent = act;
       $("update-bar").hidden = false;
-      st.textContent = `發現新版本 v${u.version}，按下「${act}」${isAndroid ? "，用瀏覽器下載後點開安裝" : "安裝"}`;
+      st.textContent = `發現新版本 v${u.version}${tag}，按下「${act}」${isAndroid ? "，用瀏覽器下載後點開安裝" : "安裝"}`;
       btn.textContent = act;
     } else if (manual) {
-      st.textContent = `✓ 目前已是最新版本（${$("ver").textContent.replace("目前版本 ", "")}）`;
+      st.textContent = `✓ 目前已是最新版本（v${appVer}）`;
       btn.textContent = "檢查更新";
     }
   } catch (err) {
@@ -1974,6 +1976,29 @@ async function installUpdate() {
     toast("更新失敗：" + err);
   }
 }
+// update channel: stable (default) or preview (early builds). A device setting, not synced.
+const CHAN_HINT = {
+  stable: "穩定版：只收到經過測試、正式發布的版本（建議）。",
+  preview: "預覽版：會比穩定版更早收到新功能，但可能還有沒修好的問題，資料格式也可能調整，建議先匯出備份。有新的穩定版時也會一併提醒。切回「穩定版」不會自動降版：要等穩定版超過目前版本才會再提醒；想退回舊版需要重新安裝（先匯出備份）。",
+};
+function renderChannel() {
+  const c = data.channel === "preview" ? "preview" : "stable";
+  [...$("chan-seg").children].forEach((b) => b.classList.toggle("on", b.dataset.c === c));
+  $("chan-hint").textContent = CHAN_HINT[c];
+}
+$("chan-seg").onclick = async (e) => {
+  const b = e.target.closest("button");
+  if (!b || b.dataset.c === (data.channel || "stable")) return;
+  if (b.dataset.c === "preview" && !(await confirmBox("改用預覽版？", "預覽版會比穩定版更早收到新功能，但可能還有沒修好的問題，資料格式也可能調整。建議先匯出備份。隨時可以切回穩定版。", "改用預覽版"))) return;
+  try {
+    data = await invoke("set_channel", { channel: b.dataset.c });
+    renderChannel();
+    pendingUpdate = null;
+    $("update-bar").hidden = true;
+    $("upd-btn").textContent = "檢查更新";
+    checkUpdate(true); // look right away on the new channel
+  } catch (err) { $("upd-status").textContent = "無法切換頻道：" + err; }
+};
 $("update-later").onclick = () => ($("update-bar").hidden = true);
 $("update-now").onclick = installUpdate;
 $("upd-btn").onclick = () => (pendingUpdate ? installUpdate() : checkUpdate(true));

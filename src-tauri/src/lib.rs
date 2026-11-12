@@ -249,6 +249,10 @@ struct Data {
     /// The main currency every total, goal and the ledger is shown in; foreign-currency items convert into it.
     #[serde(default = "base_currency")]
     base: String,
+    /// Which releases this device is offered: "stable" (default) or "preview" (early builds, 0.x.y-preview.N).
+    /// A device setting: never synced and kept when a backup is restored.
+    #[serde(default = "default_channel")]
+    channel: String,
     /// false only on a brand-new install, until the user has picked `base` (old data files count as picked: they are TWD).
     #[serde(default = "yes")]
     base_set: bool,
@@ -340,6 +344,7 @@ impl Default for Data {
             device_name: String::new(),
             install_id: String::new(),
             base: base_currency(),
+            channel: default_channel(),
             base_set: false,
         }
     }
@@ -347,6 +352,9 @@ impl Default for Data {
 
 fn base_currency() -> String {
     DEFAULT_BASE.to_string()
+}
+fn default_channel() -> String {
+    "stable".to_string()
 }
 fn default_port() -> u16 {
     DEFAULT_PORT
@@ -1585,6 +1593,7 @@ impl Core {
         }
         let mut d = self.data.lock().unwrap();
         // The backup only carries finance data; keep this machine's own sync settings.
+        inc.channel = d.channel.clone();
         inc.sync_enabled = d.sync_enabled;
         inc.sync_port = d.sync_port;
         inc.sync_pin = d.sync_pin.clone();
@@ -2166,6 +2175,17 @@ impl Core {
         d.base = code;
         d.base_set = true;
         self.commit(&mut d)?;
+        Ok(view(&d))
+    }
+
+    /// "stable" or "preview": which releases the update check offers on this device.
+    fn set_channel(&self, channel: &str) -> Result<Value, String> {
+        if !matches!(channel, "stable" | "preview") {
+            return Err("不支援的更新頻道".into());
+        }
+        let mut d = self.data.lock().unwrap();
+        d.channel = channel.to_string();
+        self.persist(&mut d)?;
         Ok(view(&d))
     }
 
@@ -3035,6 +3055,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
             let base = core.data.lock().unwrap().base.clone();
             rate_quote(&arg::<String>(&args, "code")?, &base)
         }
+        "set_channel" if !remote => core.set_channel(&arg::<String>(&args, "channel")?),
         "set_base" if !remote => core.set_base(&arg::<String>(&args, "code")?),
         "import_tracker" => core.import_tracker(&arg::<String>(&args, "text")?),
         "import_history" => core.import_history(&arg::<String>(&args, "text")?),
@@ -3270,12 +3291,28 @@ fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+fn channel_of(app: &AppHandle) -> String {
+    app.state::<Arc<Core>>().data.lock().unwrap().channel.clone()
+}
+
+/// The updater for this device's channel: stable uses the endpoint from tauri.conf.json (the latest stable release),
+/// preview reads the feed that always points at the newest build.
+#[cfg(desktop)]
+fn updater_for(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let mut b = app.updater_builder();
+    if channel_of(app) == "preview" {
+        let url = PREVIEW_FEED.parse::<tauri::Url>().map_err(|e| e.to_string())?;
+        b = b.endpoints(vec![url]).map_err(|e| e.to_string())?;
+    }
+    b.build().map_err(|e| e.to_string())
+}
+
 #[cfg(desktop)]
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<Value, String> {
-    let upd = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
+    let upd = updater_for(&app)?.check().await.map_err(|e| e.to_string())?;
     Ok(match upd {
-        Some(u) => json!({ "version": u.version, "notes": u.body }),
+        Some(u) => json!({ "version": u.version, "notes": u.body, "preview": u.version.contains('-') }),
         None => Value::Null,
     })
 }
@@ -3283,47 +3320,63 @@ async fn check_update(app: AppHandle) -> Result<Value, String> {
 #[cfg(desktop)]
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
-    let upd = app
-        .updater()
-        .map_err(|e| e.to_string())?
-        .check()
-        .await
-        .map_err(|e| e.to_string())?
-        .ok_or("目前已是最新版本")?;
+    let upd = updater_for(&app)?.check().await.map_err(|e| e.to_string())?.ok_or("目前已是最新版本")?;
     upd.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
     app.restart()
 }
-const LATEST_RELEASE_API: &str = "https://api.github.com/repos/hankyleisplay/moneypi/releases/latest";
+const RELEASES_API: &str = "https://api.github.com/repos/hankyleisplay/moneypi/releases";
+/// Update description for the preview channel: always the newest build, preview or stable (the release workflow keeps it).
+const PREVIEW_FEED: &str = "https://github.com/hankyleisplay/moneypi/releases/download/preview-channel/latest.json";
 
-/// "v0.21.1" / "0.21.1" -> (0, 21, 1); anything else is not a version.
-fn version_tuple(v: &str) -> Option<(u64, u64, u64)> {
-    let mut it = v.trim().trim_start_matches('v').split('.').map(|p| p.parse::<u64>().ok());
+/// "v0.21.1" -> (0, 21, 1, MAX); "v0.22.0-preview.3" -> (0, 22, 0, 3). A preview sorts below the stable release of the same
+/// number, previews by their number; anything else is not one of our versions.
+fn version_key(v: &str) -> Option<(u64, u64, u64, u64)> {
+    let v = v.trim().trim_start_matches('v');
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p.strip_prefix("preview.")?.parse::<u64>().ok()?)),
+        None => (v, None),
+    };
+    let mut it = core.split('.').map(|p| p.parse::<u64>().ok());
     let t = (it.next()??, it.next()??, it.next()??);
-    it.next().is_none().then_some(t)
+    it.next().is_none().then_some((t.0, t.1, t.2, pre.unwrap_or(u64::MAX)))
 }
 
-/// If the latest GitHub release is newer than `current` and already has its APK attached, describe it for the update notice.
-/// (The APK is attached a few minutes after the release goes public, so an APK-less release is not offered yet.)
+/// The best newer release that already has its APK attached, from GitHub's release list (or a single release).
+/// A preview build only counts on the preview channel. (The APK is attached a few minutes after a release goes public,
+/// so a release without one is not offered yet.)
 #[cfg_attr(not(mobile), allow(dead_code))]
-fn release_update(release: &Value, current: &str) -> Option<Value> {
-    if release["draft"].as_bool() == Some(true) || release["prerelease"].as_bool() == Some(true) {
-        return None;
-    }
-    let tag = release["tag_name"].as_str()?;
-    if version_tuple(tag)? <= version_tuple(current)? {
-        return None;
-    }
-    let url = release["assets"].as_array()?.iter().filter_map(|a| a["browser_download_url"].as_str()).find(|u| is_release_apk(u))?;
-    Some(json!({ "version": tag.trim_start_matches('v'), "notes": release["body"].as_str().unwrap_or(""), "url": url }))
+fn pick_update(releases: &Value, current: &str, channel: &str) -> Option<Value> {
+    let cur = version_key(current)?;
+    let list: Vec<&Value> = match releases.as_array() {
+        Some(a) => a.iter().collect(),
+        None => vec![releases],
+    };
+    list.into_iter()
+        .filter(|r| r["draft"].as_bool() != Some(true))
+        .filter(|r| channel == "preview" || r["prerelease"].as_bool() != Some(true))
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str()?;
+            let key = version_key(tag)?;
+            if key <= cur || (channel != "preview" && key.3 != u64::MAX) {
+                return None;
+            }
+            let url = r["assets"].as_array()?.iter().filter_map(|a| a["browser_download_url"].as_str()).find(|u| is_release_apk(u))?;
+            Some((key, json!({ "version": tag.trim_start_matches('v'), "notes": r["body"].as_str().unwrap_or(""), "url": url, "preview": key.3 != u64::MAX })))
+        })
+        .max_by_key(|(k, _)| *k)
+        .map(|(_, v)| v)
 }
 
 #[cfg(mobile)]
 #[tauri::command]
-async fn check_update(_app: AppHandle) -> Result<Value, String> {
+async fn check_update(app: AppHandle) -> Result<Value, String> {
     // The phone cannot install an update by itself (Android does not allow that): it only looks for a newer release and
     // offers its APK for download. Nothing about the user is sent besides the plain request.
-    tauri::async_runtime::spawn_blocking(|| {
-        let v: Value = ureq::get(LATEST_RELEASE_API)
+    let channel = channel_of(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        // stable: GitHub's own "latest" (never a pre-release); preview: the recent list, which includes pre-releases
+        let url = if channel == "preview" { format!("{RELEASES_API}?per_page=20") } else { format!("{RELEASES_API}/latest") };
+        let v: Value = ureq::get(&url)
             .set("Accept", "application/vnd.github+json")
             .set("User-Agent", "MoneyPi")
             .timeout(Duration::from_secs(10))
@@ -3331,7 +3384,7 @@ async fn check_update(_app: AppHandle) -> Result<Value, String> {
             .map_err(|_| "連不上 GitHub，請確認網路".to_string())?
             .into_json()
             .map_err(|_| "GitHub 回應格式錯誤".to_string())?;
-        Ok(release_update(&v, env!("CARGO_PKG_VERSION")).unwrap_or(Value::Null))
+        Ok(pick_update(&v, env!("CARGO_PKG_VERSION"), &channel).unwrap_or(Value::Null))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -4080,35 +4133,83 @@ mod tests {
     // ------------------------------------------------------------- phone update notice
 
     #[test]
-    fn versions_compare_by_number_not_by_text() {
-        assert_eq!(version_tuple("v0.21.1"), Some((0, 21, 1)));
-        assert!(version_tuple("0.9.0") < version_tuple("0.21.0"), "0.9 is older than 0.21");
-        for bad in ["", "v1", "1.2", "1.2.3.4", "1.2.x", "latest", "v-1.0.0"] {
-            assert_eq!(version_tuple(bad), None, "{bad:?}");
+    fn versions_compare_by_number_and_a_preview_is_below_its_stable_release() {
+        assert_eq!(version_key("v0.21.1"), Some((0, 21, 1, u64::MAX)));
+        assert_eq!(version_key("0.22.0-preview.3"), Some((0, 22, 0, 3)));
+        assert!(version_key("0.9.0") < version_key("0.21.0"), "0.9 is older than 0.21");
+        assert!(version_key("0.22.0-preview.2") < version_key("0.22.0-preview.10"), "preview numbers are numbers");
+        assert!(version_key("0.22.0-preview.9") < version_key("0.22.0"), "a preview is older than its stable release");
+        assert!(version_key("0.21.5") < version_key("0.22.0-preview.1"), "but newer than the previous stable one");
+        for bad in ["", "v1", "1.2", "1.2.3.4", "1.2.x", "latest", "v-1.0.0", "preview-channel", "0.22.0-beta.1", "0.22.0-preview", "0.22.0-preview.x", "0.22.0-preview.1.2"] {
+            assert_eq!(version_key(bad), None, "{bad:?}");
         }
     }
 
     #[test]
-    fn the_update_notice_only_offers_a_newer_release_that_already_has_its_apk() {
-        let apk = "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/MoneyPi_0.21.1_android.apk";
-        let rel = |tag: &str, assets: Value| json!({ "tag_name": tag, "body": "notes", "draft": false, "prerelease": false, "assets": assets });
-        let with_apk = json!([{ "name": "x.exe", "browser_download_url": "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/x.exe" }, { "browser_download_url": apk }]);
-        let u = release_update(&rel("v0.21.1", with_apk.clone()), "0.21.0").unwrap();
-        assert_eq!((u["version"].as_str(), u["url"].as_str(), u["notes"].as_str()), (Some("0.21.1"), Some(apk), Some("notes")));
-        assert!(release_update(&rel("v0.21.0", with_apk.clone()), "0.21.0").is_none(), "same version");
-        assert!(release_update(&rel("v0.20.9", with_apk.clone()), "0.21.0").is_none(), "older");
-        assert!(release_update(&rel("v0.21.1", json!([])), "0.21.0").is_none(), "APK not attached yet");
-        assert!(release_update(&json!({ "tag_name": "v0.22.0", "draft": true, "assets": with_apk }), "0.21.0").is_none());
-        assert!(release_update(&json!({ "tag_name": "v0.22.0", "prerelease": true, "assets": with_apk }), "0.21.0").is_none());
-        assert!(release_update(&json!({ "message": "rate limited" }), "0.21.0").is_none());
-        let evil = json!([{ "browser_download_url": "https://evil.example/MoneyPi.apk" }]);
-        assert!(release_update(&rel("v0.22.0", evil), "0.21.0").is_none(), "only this project's own APK");
+    fn the_update_notice_offers_the_best_newer_release_for_the_channel_and_only_with_its_apk() {
+        let apk = |v: &str| format!("https://github.com/hankyleisplay/moneypi/releases/download/v{v}/MoneyPi_{v}_android.apk");
+        let rel = |v: &str, pre: bool, with_apk: bool| {
+            let assets = if with_apk { json!([{ "browser_download_url": format!("https://github.com/hankyleisplay/moneypi/releases/download/v{v}/x.exe") }, { "browser_download_url": apk(v) }]) } else { json!([]) };
+            json!({ "tag_name": format!("v{v}"), "body": "notes", "draft": false, "prerelease": pre, "assets": assets })
+        };
+        // single release (what /releases/latest returns)
+        let u = pick_update(&rel("0.21.1", false, true), "0.21.0", "stable").unwrap();
+        assert_eq!((u["version"].as_str(), u["url"].as_str(), u["notes"].as_str(), u["preview"].as_bool()), (Some("0.21.1"), Some(apk("0.21.1").as_str()), Some("notes"), Some(false)));
+        assert!(pick_update(&rel("0.21.0", false, true), "0.21.0", "stable").is_none(), "same version");
+        assert!(pick_update(&rel("0.20.9", false, true), "0.21.0", "stable").is_none(), "older");
+        assert!(pick_update(&rel("0.21.1", false, false), "0.21.0", "stable").is_none(), "APK not attached yet");
+        let mut draft = rel("0.22.0", false, true);
+        draft["draft"] = json!(true);
+        assert!(pick_update(&draft, "0.21.0", "preview").is_none(), "drafts are never offered");
+        assert!(pick_update(&json!({ "message": "rate limited" }), "0.21.0", "stable").is_none());
+        let evil = json!({ "tag_name": "v0.22.0", "assets": [{ "browser_download_url": "https://evil.example/MoneyPi.apk" }] });
+        assert!(pick_update(&evil, "0.21.0", "stable").is_none(), "only this project's own APK");
+
+        // the release list: previews only count on the preview channel, and the highest version wins
+        let list = json!([rel("0.22.0-preview.2", true, true), rel("0.22.0-preview.1", true, true), rel("0.21.1", false, true), rel("0.21.0", false, true), json!({ "tag_name": "preview-channel", "prerelease": true, "assets": [] })]);
+        assert_eq!(pick_update(&list, "0.21.0", "stable").unwrap()["version"], "0.21.1", "stable never gets a preview");
+        let p = pick_update(&list, "0.21.0", "preview").unwrap();
+        assert_eq!((p["version"].as_str(), p["preview"].as_bool()), (Some("0.22.0-preview.2"), Some(true)));
+        assert_eq!(pick_update(&list, "0.22.0-preview.1", "preview").unwrap()["version"], "0.22.0-preview.2");
+        assert!(pick_update(&list, "0.22.0-preview.2", "preview").is_none(), "already on the newest preview");
+        // when the stable release arrives it is newer than its previews
+        let list = json!([rel("0.22.0", false, true), rel("0.22.0-preview.2", true, true)]);
+        assert_eq!(pick_update(&list, "0.22.0-preview.2", "preview").unwrap()["version"], "0.22.0");
+        assert_eq!(pick_update(&list, "0.22.0-preview.2", "stable").unwrap()["version"], "0.22.0", "a preview build on the stable channel still gets the stable release");
+        // a preview whose APK is still being attached is skipped in favour of the next one down that is complete
+        let list = json!([rel("0.22.0-preview.3", true, false), rel("0.22.0-preview.2", true, true)]);
+        assert_eq!(pick_update(&list, "0.21.0", "preview").unwrap()["version"], "0.22.0-preview.2");
+    }
+
+    #[test]
+    fn the_update_channel_is_a_device_setting_that_stays_out_of_sync_and_backups() {
+        let c = Arc::new(temp_core("channel"));
+        assert_eq!(c.data.lock().unwrap().channel, "stable", "stable by default (and for old data files)");
+        assert!(c.set_channel("beta").is_err());
+        let v = dispatch(&c, "set_channel", json!({ "channel": "preview" }), false).unwrap();
+        assert_eq!(v["channel"], "preview");
+        assert!(dispatch(&c, "set_channel", json!({ "channel": "preview" }), true).is_err(), "not available over the network");
+        // never part of what two devices exchange
+        let (pc, phone) = pair();
+        dispatch(&pc, "set_channel", json!({ "channel": "preview" }), false).unwrap();
+        exchange(&pc, &phone);
+        assert_eq!(phone.data.lock().unwrap().channel, "stable");
+        // a restored backup keeps this device's own choice
+        let backup = pc.data.lock().unwrap().channel.clone();
+        let text = c.export_backup().replace("\"channel\": \"preview\"", "\"channel\": \"stable\"");
+        assert_eq!(backup, "preview");
+        c.import_backup(&text, None).unwrap();
+        assert_eq!(c.data.lock().unwrap().channel, "preview");
+        let old: Data = serde_json::from_str(r#"{"next_id":0,"assets":[],"snapshots":[]}"#).unwrap();
+        assert_eq!(old.channel, "stable");
     }
 
     #[test]
     fn only_this_projects_release_apks_can_be_opened_from_the_update_notice() {
         let good = "https://github.com/hankyleisplay/moneypi/releases/download/v0.21.1/MoneyPi_0.21.1_android.apk";
         assert_eq!(external_url(good), Ok(good));
+        let pre = "https://github.com/hankyleisplay/moneypi/releases/download/v0.22.0-preview.1/MoneyPi_0.22.0-preview.1_android.apk";
+        assert_eq!(external_url(pre), Ok(pre), "preview builds are release APKs too");
         assert_eq!(external_url("update"), Ok("https://github.com/hankyleisplay/moneypi/releases/latest"));
         for bad in [
             "https://github.com/other/moneypi/releases/download/v0.21.1/a.apk",
