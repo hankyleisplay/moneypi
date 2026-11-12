@@ -46,6 +46,11 @@
       <span class="lbl">月報</span>
     </button>
 
+    <button class="nav peer-only" id="nav-connect" title="連線" hidden>
+      <span class="av" style="background:linear-gradient(145deg,#6a8cff,#7a5cff)"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <span class="lbl">連線</span>
+    </button>
+
     <div class="side-tools">
       <input id="q" type="text" placeholder="搜尋項目…" autocomplete="off">
       <div class="seg" id="kind">
@@ -161,6 +166,42 @@
       <div class="glass panel"><h3>支出前幾名</h3><div class="bars" id="rp-cats"></div></div>
     </div>
 
+    <div id="view-connect" class="view" hidden>
+      <div class="glass panel conn-status">
+        <div class="cs-head"><i id="cs-dot"></i><div class="cs-t"><h3 id="cs-title">尚未綁定</h3><p class="muted" id="cs-sub"></p></div></div>
+        <div id="peer-bound" hidden><div class="btns"><button type="button" id="peer-now" class="primary">立即同步</button><button type="button" id="peer-off" class="danger">解除綁定</button></div></div>
+        <p class="hint" id="peer-status"></p>
+      </div>
+
+      <div class="glass panel droid-only" id="peer-unbound" hidden>
+        <h3>綁定電腦</h3>
+        <ol class="steps">
+          <li>電腦要先更新到最新版 MoneyPi 並開著，手機與電腦連到<b>同一個 Wi-Fi</b>。</li>
+          <li>在電腦的 MoneyPi 按標題列的手機圖示（<b>手機連線</b>），開啟「啟用手機連線」，會看到位址與 PIN。</li>
+          <li>把位址與 PIN 輸入下面（也可以直接貼上整條連結，PIN 會自動帶入），按「綁定並同步」。</li>
+        </ol>
+        <label>電腦位址或連結<input id="peer-link" placeholder="例如 192.168.1.5:8787，或貼上手機連線的網址" autocomplete="off" inputmode="url"></label>
+        <label>PIN<input id="peer-pin" inputmode="numeric" autocomplete="off" placeholder="電腦「手機連線」裡的 PIN；貼上連結時可留空"></label>
+        <div class="btns"><button type="button" id="peer-bind" class="primary">綁定並同步</button></div>
+      </div>
+
+      <div class="glass panel desk-only" hidden>
+        <h3>讓手機連線</h3>
+        <p class="muted" id="lan-sum">載入中…</p>
+        <div class="btns"><button type="button" id="conn-phone">開啟手機連線設定（QR Code、遠端）</button></div>
+      </div>
+
+      <div class="glass panel">
+        <h3>運作方式</h3>
+        <ul class="plain">
+          <li>兩邊各自保存一份資料，沒有連線也能照常新增與修改。</li>
+          <li>每次開啟 App、回到畫面、修改資料後與每 5 分鐘，會自動找對方；找到就雙向合併。</li>
+          <li>需要在<b>同一個 Wi-Fi</b>；手機 App 要開著，電腦才找得到它。電腦的位址變了，手機會自動找回來。</li>
+          <li>兩邊各自新增的資料會合併，刪除也會同步；同一項目兩邊都改過時，以較晚修改的為準。</li>
+        </ul>
+      </div>
+    </div>
+
     <div id="view-flow" class="view" hidden>
       <div class="glass panel">
         <div class="panel-head">
@@ -218,7 +259,7 @@
     <div class="seg" id="f-kind"><button type="button" data-k="out" class="on">支出</button><button type="button" data-k="in">收入</button></div>
     <label>日期<input name="date" placeholder="YYYY-MM-DD" required autocomplete="off"></label>
     <div class="two">
-      <label>金額（NT$）<input name="amount" type="number" min="0" step="any" required></label>
+      <label>金額（<span class="b-sym">NT$</span>）<input name="amount" type="number" min="0" step="any" required></label>
       <div class="field">類別<div class="dd" id="ff-cat"></div></div>
     </div>
     <label>備註<input name="note" autocomplete="off"></label>
@@ -263,6 +304,43 @@
       </ol>
     </details>
 
+    <details class="help"><summary>主要幣別是什麼？</summary>
+      <p>第一次開啟時選的幣別就是<b>主要幣別</b>：總資產、淨資產、目標、月報和記帳都用它顯示；美元、日圓等外幣項目會依「設定」裡的匯率折算進來。</p>
+      <p>之後想換，到<b>「設定」→「主要幣別」→「更改」</b>。換的時候，歷史月報、目標和記帳金額會按目前匯率換算成新幣別（會先自動備份）。</p>
+      <p>電腦和手機要用<b>同一個主要幣別</b>才能同步；全新的手機連上電腦後，會自動沿用電腦的幣別。</p>
+    </details>
+
+    <details open class="help droid-only" hidden><summary>手機版怎麼用</summary>
+      <p><b>資料存在這支手機裡。</b>不用電腦、不用網路，也能新增項目、記帳、記錄交易、看總覽與月報。</p>
+      <p><b>和電腦版的差別：</b>密碼鎖、自動備份資料夾、遠端連線是電腦版才有的功能；定期定額與配息由電腦負責記入，手機會在同步時收到結果。</p>
+      <p><b>股價與匯率：</b>有網路時按上方的「同步股價與匯率」，或到「設定」開啟自動更新（最短 15 秒）。</p>
+    </details>
+
+    <details class="help droid-only" hidden><summary>綁定電腦並自動同步</summary>
+      <ol>
+        <li>電腦的 MoneyPi 更新到最新版，手機與電腦連到<b>同一個 Wi-Fi</b>。</li>
+        <li>在電腦按標題列的手機圖示，開啟「啟用手機連線」，記下位址與 PIN。</li>
+        <li>手機這邊點左邊的<b>「連線」</b>，輸入位址與 PIN（或貼上整條連結），按「綁定並同步」。</li>
+      </ol>
+      <p>綁定後，每次開啟 App、回到畫面、修改資料後與每 5 分鐘都會自動找電腦；找到就雙向合併。兩邊各自新增的資料不會撞號，刪除也會同步。標題列的小標籤會顯示「已同步」「同步中」或「電腦未連線」。</p>
+    </details>
+
+    <details class="help droid-only" hidden><summary>備份、匯出與還原</summary>
+      <p><b>匯出：</b>「設定 → 匯出備份」會顯示一段文字，按「複製」後貼到筆記或訊息保存，也可以按「分享」傳給其他 App。<b>還原：</b>「設定 → 貼上備份文字還原」，把那段文字整段貼回去。</p>
+      <p>綁定電腦後，電腦那邊也有一份完整資料，等於多一份備份。</p>
+    </details>
+
+    <details class="help droid-only" hidden><summary>連不上電腦怎麼辦？</summary>
+      <ul class="plain">
+        <li>手機與電腦要在<b>同一個 Wi-Fi</b>（不是訪客網路，也不是行動數據）。</li>
+        <li>電腦的 MoneyPi 要開著，並且已「啟用手機連線」。</li>
+        <li>Windows 防火牆第一次會詢問，請按「允許」；部分路由器的「AP 隔離」會擋住裝置互連，需要關閉。</li>
+        <li>PIN 不對或電腦換了 PIN：到電腦的「手機連線」看最新的 PIN，再回手機「連線」頁重新綁定。</li>
+        <li>電腦的 IP 變了不用重綁，手機會自動在 Wi-Fi 裡把它找回來（最多每 2 分鐘找一次）。</li>
+        <li>電腦設了密碼而鎖定時，要先在電腦解鎖。</li>
+      </ul>
+    </details>
+
     <details class="help"><summary>新增股票／ETF 時，成本要填在哪？</summary>
       <p><b>建議用「記錄交易」：</b>每一筆買入都記日期、股數、成交價、手續費，MoneyPi 會自動算出持有數量、平均成本、總成本，也才算得出年化報酬率。</p>
       <p>之前就買了、忘了當時價格？記錄交易時把日期改成買進那天，按「帶入這天的收盤價」就會填入當時的收盤價（實際成交價請以券商對帳單為準）。</p>
@@ -294,7 +372,7 @@
       <p>刪除一筆交易時，被扣的存款會自動還回去。</p>
     </details>
 
-    <details class="help"><summary>月報、密碼與自動備份</summary>
+    <details class="help desk-only" hidden><summary>月報、密碼與自動備份</summary>
       <p><b>月報：</b>左邊「月報」看每個月的淨資產變化、記帳結餘、投資買賣與配息、各目標進度。記帳越完整，「估計投資與其他變動」越準。</p>
       <p><b>密碼：</b>「設定 → 安全性」可設定密碼，資料檔會加密儲存，每次開啟都要輸入。<b>忘記密碼無法救回資料</b>。右上角的鎖頭可以立即鎖定。</p>
       <p><b>自動備份：</b>「設定 → 自動備份」開啟後，每天複製一份資料檔到你指定的資料夾（例如 OneDrive），保留最近幾份。設了密碼的話，備份也是加密的，還原時需要輸入當時的密碼。</p>
@@ -318,7 +396,7 @@
       <p>走勢圖的預測是用過去價格畫一條趨勢線往後延伸，淡色帶是歷史波動範圍。這只是統計外推，<b>不是預測保證，也不構成投資建議</b>。趨勢吻合度（R²）越低，參考性越低。</p>
     </details>
 
-    <details class="help"><summary>手機連線（區域網路／遠端）</summary>
+    <details class="help desk-only" hidden><summary>手機連線（區域網路／遠端）</summary>
       <p><b>區域網路：</b>電腦和手機在同一個 Wi-Fi，掃描 QR Code 即可。<b>遠端：</b>不限網路，需要 cloudflared 工具，MoneyPi 會詢問並協助安裝；每次開啟都是新網址與新密鑰，請用 QR Code 或「複製連結」，只輸入網址無法連線。</p>
     </details>
 
@@ -398,25 +476,23 @@
     </div>
     <p class="hint">報價與匯率會同時抓取，間隔越短越即時；視窗隱藏或正在編輯時會自動暫停。</p>
 
-    <div class="peer-only" hidden>
-      <h4>裝置同步</h4>
-      <p class="hint" id="peer-text"></p>
-      <div class="droid-only" id="peer-unbound" hidden>
-        <label>電腦位址或連結<input id="peer-link" placeholder="例如 192.168.1.5:8787，或貼上手機連線的網址" autocomplete="off" inputmode="url"></label>
-        <label>PIN<input id="peer-pin" inputmode="numeric" autocomplete="off" placeholder="電腦「手機連線」裡的 PIN；貼上連結時可留空"></label>
-        <div class="btns"><button type="button" id="peer-bind" class="primary">綁定並同步</button></div>
-      </div>
-      <div id="peer-bound" hidden>
-        <div class="btns"><button type="button" id="peer-now">立即同步</button><button type="button" id="peer-off" class="danger">解除綁定</button></div>
-      </div>
-      <p class="hint" id="peer-status"></p>
-    </div>
+    <h4>主要幣別</h4>
+    <div class="row"><span id="base-now" class="base-now"></span><button type="button" id="base-change">更改</button></div>
+    <p class="hint">總資產、淨資產、目標、月報和記帳都用這個幣別顯示，外幣項目會依匯率折算。更改時，歷史月報、目標與記帳金額會按目前匯率換算（會先備份）。</p>
 
-    <h4>匯率（1 單位折合 TWD）</h4>
+    <h4>匯率（1 單位折合<span class="b-name">台幣</span>）</h4>
+    <p class="hint">用在外幣項目折算成<span class="b-name">台幣</span>。按「同步」或開啟自動更新時，匯率會更新成最新值；手動改的數字下次更新會被覆蓋。</p>
     <div id="rates"></div>
-    <div class="two add-rate">
-      <input id="new-code" placeholder="新增幣別，如 GBP" maxlength="5" autocomplete="off">
-      <input id="new-rate" type="number" min="0" step="any" placeholder="匯率">
+    <div class="rate-add">
+      <div class="field">加入其他幣別<div class="dd" id="rate-pick"></div></div>
+      <label id="rate-other" hidden>幣別代碼<input id="new-code" placeholder="例如 GBP、KRW" maxlength="5" autocomplete="off"></label>
+      <div class="rate-line">
+        <span class="rl-l">1 <b id="new-cur">—</b> =</span>
+        <input id="new-rate" type="number" min="0" step="any" inputmode="decimal" placeholder="匯率">
+        <span class="rl-r b-name">台幣</span>
+      </div>
+      <button type="button" class="primary rate-add-btn" id="rate-add-btn" disabled><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>加入這個幣別</button>
+      <p class="hint" id="rate-hint"></p>
     </div>
 
     <div class="desk-only" hidden>
@@ -460,7 +536,7 @@
       <label>名稱<input name="name" required placeholder="財富自由、買跑車…" autocomplete="off"></label>
     </div>
     <div class="two">
-      <label>目標金額（TWD）<input name="amount" type="number" min="0" step="any" required></label>
+      <label>目標金額（<span class="b-code">TWD</span>）<input name="amount" type="number" min="0" step="any" required></label>
       <label>目標日期（選填）<input name="date" placeholder="YYYY-MM-DD" autocomplete="off"></label>
     </div>
     <div class="field">計算基準
@@ -535,6 +611,19 @@
       <button type="button" id="x-go" class="primary" hidden>還原</button>
       <button type="button" data-close>關閉</button>
     </menu>
+  </form>
+</dialog>
+
+<dialog id="basedlg" class="glass small">
+  <form method="dialog" id="baseform">
+    <h3 id="base-title">選擇你的主要幣別</h3>
+    <p class="muted" id="base-desc"></p>
+    <div class="field">主要幣別<div class="dd" id="base-pick"></div></div>
+    <label id="base-other" hidden>幣別代碼<input id="base-code" placeholder="例如 THB、IDR" maxlength="5" autocomplete="off"></label>
+    <p class="hint" id="base-hint"></p>
+    <p id="base-err" class="neg"></p>
+    <menu><button type="button" id="base-cancel" hidden>取消</button><button type="submit" class="primary" id="base-ok">開始使用</button></menu>
+    <button type="button" class="link droid-only" id="base-connect" hidden>已經有電腦版？先去連線，幣別會跟電腦一致</button>
   </form>
 </dialog>
 

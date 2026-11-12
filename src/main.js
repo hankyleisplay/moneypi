@@ -75,7 +75,7 @@ function askPin(msg) {
   });
 }
 
-let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_sec: 0, cashflow: [] };
+let data = { assets: [], snapshots: [], rates: { TWD: 1 }, goals: [], refresh_sec: 0, cashflow: [], base: "TWD", base_set: true };
 const ui = {
   kind: "all", cat: "", q: "", sort: "value", range: 0, fcRange: "1y", rm: new Date().toLocaleDateString("sv-SE").slice(0, 7), sel: null, hover: -1, fm: new Date().toLocaleDateString("sv-SE").slice(0, 7),
   hidden: store.get("hidden", "0") === "1",
@@ -83,7 +83,10 @@ const ui = {
 
 const rate = (cur) => data.rates[cur] ?? 1;
 const toBase = (a) => a.value * rate(a.currency);
-const money = (n) => (ui.hidden ? "NT$ ••••" : "NT$ " + fmt0.format(n));
+const SYMBOLS = { TWD: "NT$", USD: "US$", JPY: "¥", CNY: "CN¥", EUR: "€", GBP: "£", HKD: "HK$", KRW: "₩", AUD: "A$", CAD: "C$", SGD: "S$", NZD: "NZ$", THB: "฿", MYR: "RM", VND: "₫", PHP: "₱", IDR: "Rp", INR: "₹" };
+const baseCur = () => data.base || "TWD"; // the main currency every total is shown in
+const sym = () => SYMBOLS[baseCur()] || baseCur();
+const money = (n) => (ui.hidden ? sym() + " ••••" : sym() + " " + fmt0.format(n));
 const sum = (xs) => xs.reduce((s, a) => s + toBase(a), 0);
 const mask = () => (ui.hidden ? "blur" : "");
 const signed = (n, f = fmt0) => (n >= 0 ? "+" : "−") + f.format(Math.abs(n));
@@ -214,18 +217,32 @@ tKind.setOptions([{ value: "buy", label: "買入" }, { value: "sell", label: "�
 
 /* ---------- sidebar collapse / hide amounts ---------- */
 const side = $("side");
-function setCollapsed(c) {
+// Window size class, so the layout follows the window (phone, folded / unfolded foldable, tablet, desktop):
+// compact <= 640, medium 641-899, expanded >= 900. The list is a floating drawer on the first two.
+const sizeClass = () => (innerWidth <= 640 ? "compact" : innerWidth < 900 ? "medium" : "expanded");
+let curSize = sizeClass();
+const floating = () => curSize !== "expanded";
+// auto = not a user choice (a size change or a tap outside): the choice is only remembered when the user makes it, once per size class
+function setCollapsed(c, auto) {
   side.classList.toggle("collapsed", c);
   $("collapse-btn").title = $("collapse-btn").ariaLabel = c ? "展開清單" : "收合清單";
-  store.set("collapsed", c ? "1" : "0");
+  if (!auto) store.set("collapsed_" + curSize, c ? "1" : "0");
+}
+function applySize(first) {
+  const s = sizeClass(), changed = s !== curSize;
+  curSize = s;
+  document.documentElement.dataset.size = s;
+  if (first || changed) setCollapsed(store.get("collapsed_" + s, s === "expanded" ? store.get("collapsed", "0") : "1") === "1", true); // the old single flag only seeds "expanded"
 }
 side.style.transition = "none"; // no slide animation on first paint
-setCollapsed(store.get("collapsed", innerWidth < 760 ? "1" : "0") === "1");
+applySize(true);
 requestAnimationFrame(() => requestAnimationFrame(() => (side.style.transition = "")));
+let sizeRaf = 0;
+addEventListener("resize", () => { cancelAnimationFrame(sizeRaf); sizeRaf = requestAnimationFrame(() => applySize(false)); }); // fold / unfold / rotate / split screen
 $("collapse-btn").onclick = () => setCollapsed(!side.classList.contains("collapsed"));
-// phone: the expanded list floats over the page, so a tap anywhere else closes it
+// compact / medium: the expanded list floats over the page, so a tap anywhere else closes it
 document.addEventListener("click", (e) => {
-  if (innerWidth <= 640 && !side.classList.contains("collapsed") && !e.target.closest("#side, dialog")) setCollapsed(true);
+  if (floating() && !side.classList.contains("collapsed") && !e.target.closest("#side, dialog")) setCollapsed(true, true);
 });
 $("hide-btn").onclick = () => {
   ui.hidden = !ui.hidden;
@@ -416,7 +433,14 @@ $("goal-panel").onclick = async (e) => {
 };
 
 /* ---------- render ---------- */
+// text that names the main currency (labels, hints) follows the chosen one
+function applyBaseLabels() {
+  document.querySelectorAll(".b-sym").forEach((e) => (e.textContent = sym()));
+  document.querySelectorAll(".b-code").forEach((e) => (e.textContent = baseCur()));
+  document.querySelectorAll(".b-name").forEach((e) => (e.textContent = curInfo(baseCur()).name || baseCur()));
+}
 function render() {
+  applyBaseLabels();
   if (typeof ui.sel === "number" && !data.assets.some((a) => a.id === ui.sel)) ui.sel = null;
   const A = data.assets.filter((a) => !a.liability);
   const L = data.assets.filter((a) => a.liability);
@@ -470,11 +494,12 @@ function renderList() {
   $("nav-overview").classList.toggle("on", ui.sel === null);
   $("nav-flow").classList.toggle("on", ui.sel === "flow");
   $("nav-report").classList.toggle("on", ui.sel === "report");
+  $("nav-connect").classList.toggle("on", ui.sel === "connect");
   $("empty").hidden = xs.length > 0;
   $("empty").textContent = data.assets.length ? "沒有符合條件的項目" : "尚無項目，按下方「新增項目」開始記錄";
   $("list").innerHTML = xs
     .map((a) => {
-      const sub = [a.liability ? "負債" : "", a.holding && a.symbol ? a.symbol : a.category, a.currency === "TWD" ? "" : a.currency].filter(Boolean).join(" · ");
+      const sub = [a.liability ? "負債" : "", a.holding && a.symbol ? a.symbol : a.category, a.currency === baseCur() ? "" : a.currency].filter(Boolean).join(" · ");
       return `<button class="item ${a.id === ui.sel ? "on" : ""}" data-id="${a.id}" title="${esc(a.name)}">
       <span class="av" style="background:${catColor(a.category)}">${esc([...a.name][0] || "?")}</span>
       <span class="meta"><b>${esc(a.name)}</b><small>${esc(sub)}</small></span>
@@ -735,14 +760,16 @@ function holdingHtml(a) {
 
 function renderView() {
   const a = typeof ui.sel === "number" ? data.assets.find((x) => x.id === ui.sel) : null;
-  const flow = ui.sel === "flow", report = ui.sel === "report";
-  $("view-overview").hidden = !!a || flow || report;
+  const flow = ui.sel === "flow", report = ui.sel === "report", connect = ui.sel === "connect";
+  $("view-overview").hidden = !!a || flow || report || connect;
   $("view-detail").hidden = !a;
   $("view-flow").hidden = !flow;
   $("view-report").hidden = !report;
-  $("title").textContent = a ? a.name : flow ? "記帳" : report ? "月報" : "總覽";
+  $("view-connect").hidden = !connect;
+  $("title").textContent = a ? a.name : flow ? "記帳" : report ? "月報" : connect ? "連線" : "總覽";
   if (flow) return renderFlow();
   if (report) return renderReport();
+  if (connect) return openConnect();
   if (!a) return drawCharts();
 
   const pool = sum(data.assets.filter((x) => x.liability === a.liability));
@@ -757,9 +784,9 @@ function renderView() {
     <div class="d-amount ${a.liability ? "neg" : ""} ${mask()}">${sgn}${esc(a.currency)} ${fmt.format(a.value)}</div>
     ${a.holding ? `<div class="d-cap muted">現值 = 持有數量 × 現價${tip("現值")}　（成本與損益在下方「持倉」）</div>` : ""}
     <div class="stats">
-      <div class="stat"><span>折合 TWD</span><b class="${mask()}">${sgn}${fmt0.format(toBase(a))}</b></div>
+      <div class="stat"><span>折合 ${esc(baseCur())}</span><b class="${mask()}">${sgn}${fmt0.format(toBase(a))}</b></div>
       <div class="stat"><span>佔總${a.liability ? "負債" : "資產"}</span><b>${share.toFixed(1)}%</b></div>
-      <div class="stat"><span>匯率</span><b>${a.currency === "TWD" ? "—" : `1 ${esc(a.currency)} = ${fmt.format(rate(a.currency))} TWD`}</b></div>
+      <div class="stat"><span>匯率</span><b>${a.currency === baseCur() ? "—" : `1 ${esc(a.currency)} = ${fmt.format(rate(a.currency))} ${esc(baseCur())}`}</b></div>
       <div class="stat"><span>最後更新</span><b>${esc(a.updated)}</b></div>
       <div class="stat"><span>備註</span><b>${a.note ? esc(a.note) : "—"}</b></div>
     </div>
@@ -772,11 +799,12 @@ function select(id) {
   renderList();
   renderView();
   $("view-overview").parentElement.scrollTop = 0;
-  if (innerWidth <= 640) setCollapsed(true);
+  if (floating()) setCollapsed(true, true);
 }
 $("nav-overview").onclick = () => select(null);
 $("nav-flow").onclick = () => select("flow");
 $("nav-report").onclick = () => select("report");
+$("nav-connect").onclick = () => select("connect");
 $("list").onclick = (e) => {
   const b = e.target.closest(".item");
   if (b) select(Number(b.dataset.id));
@@ -1077,7 +1105,7 @@ function openDialog(asset) {
   $("err").textContent = "";
   const cats = asset && !CATS.includes(asset.category) ? [...CATS, asset.category] : CATS;
   fCat.setOptions(cats, asset ? asset.category : CATS[0]);
-  fCur.setOptions(Object.keys(data.rates), asset ? asset.currency : "TWD");
+  fCur.setOptions(Object.keys(data.rates).map((c) => ({ value: c, label: curLabel(c) })), asset ? asset.currency : baseCur());
   fMkt.setOptions(fMkt.opts, asset ? asset.market : "");
   if (asset) {
     form.name.value = asset.name;
@@ -1100,7 +1128,7 @@ function openDialog(asset) {
 }
 $("add-btn").onclick = () => {
   openDialog(null);
-  if (innerWidth <= 640) setCollapsed(true);
+  if (floating()) setCollapsed(true, true);
 };
 
 form.onsubmit = async (e) => {
@@ -1397,12 +1425,28 @@ const TOUR = [
   { sel: "#nav-overview", t: "總覽", d: "看淨資產走勢、資產配置、投資組合與目標進度，也可以在這裡設定多個目標。" },
   { sel: "#nav-flow", t: "記帳", d: "記錄每天的收入與支出，查看每月統計。" },
   { sel: "#nav-report", t: "月報", d: "每個月一份：淨資產變多少、存了多少、買賣與配息、各目標的進度，以及預估何時達成。" },
+  { sel: "#nav-connect", t: "連線", d: "看手機有沒有綁定、同步狀態，也可以從這裡開啟「手機連線」。" },
   { sel: "#refresh-btn", t: "同步股價與匯率", d: "有設定行情代號的股票、ETF 會抓最新報價，外幣也會更新匯率。自動更新的間隔在「設定」裡調整。" },
   { sel: "#hide-btn", t: "隱藏金額", d: "在公共場合想遮住數字，就按這裡。" },
-  { sel: "#phone-btn", t: "手機連線", d: "用手機查看同一份資料：同一個 Wi-Fi 掃 QR Code，或用「遠端」在外面也能連。" },
+  { sel: "#phone-btn", t: "手機連線", d: "用手機 App 連回這台電腦：同一個 Wi-Fi 掃 QR Code 或輸入位址與 PIN，或用「遠端」在外面也能連。綁定後兩邊會自動同步。" },
   { sel: "#settings-btn", t: "設定", d: "匯率、自動更新、備份與還原、檢查更新都在這裡。" },
   { sel: "#help-btn", t: "隨時看說明", d: "名詞旁邊有 ? 的，點一下就會解釋。完整教學在這個按鈕裡，也可以重新播放這個導覽。" },
 ];
+const TOUR_ANDROID = [
+  { t: "歡迎使用 MoneyPi 手機版", d: "資料存在這支手機裡，沒有網路、沒開電腦也能新增項目與記帳。想要的話可以綁定你的電腦，兩邊會自動同步。花 30 秒看一下怎麼用？" },
+  { sel: "#add-btn", t: "新增項目", d: "存款、現金、股票、ETF、基金、貸款都從這裡新增。股票、基金請在類別選「股票」或「基金/ETF」，再用「記錄交易」輸入買賣，成本與損益會自動算出來。" },
+  { sel: "#list", t: "你的項目清單", d: "新增的項目會列在這裡，點一下看現值、成本、損益、交易記錄與走勢。" },
+  { sel: "#nav-overview", t: "總覽", d: "淨資產走勢、資產配置、投資組合與目標進度都在這裡。" },
+  { sel: "#nav-flow", t: "記帳", d: "記錄每天的收入與支出，查看每月統計。" },
+  { sel: "#nav-report", t: "月報", d: "每個月一份：淨資產變多少、存了多少、買賣與配息，以及各目標的進度。" },
+  { sel: "#nav-connect", t: "連線：綁定你的電腦", d: "在這裡輸入電腦「手機連線」裡的位址與 PIN 就能綁定。之後每次開啟 App 會自動找電腦同步；電腦沒開也沒關係，資料先留在手機，連上再合併。" },
+  { sel: "#peer-chip", t: "同步狀態", d: "這個小標籤顯示「已同步」「同步中」或「電腦未連線」，點一下可以看詳細狀態並立即同步。" },
+  { sel: "#refresh-btn", t: "同步股價與匯率", d: "有網路時按這裡更新報價與匯率。也可以到「設定」開啟自動更新。" },
+  { sel: "#hide-btn", t: "隱藏金額", d: "在公共場合想遮住數字，就按這裡。" },
+  { sel: "#settings-btn", t: "設定", d: "匯率（可以直接從清單選幣別）、自動更新間隔、匯出備份（顯示文字讓你複製）和還原都在這裡。" },
+  { sel: "#help-btn", t: "隨時看說明", d: "這裡有手機版專屬的教學，例如怎麼綁定電腦、連不上怎麼辦，也能重新播放這個導覽。" },
+];
+const TOUR_KEY = isAndroid ? "toured_android" : "toured"; // the phone app has its own tour, shown once more after the update
 let tourSteps = [], tourI = 0;
 const visibleEl = (sel) => {
   const el = document.querySelector(sel);
@@ -1412,13 +1456,13 @@ const visibleEl = (sel) => {
 };
 function startTour() {
   if (document.querySelector("dialog[open]")) return;
-  tourSteps = TOUR.filter((s) => !s.sel || visibleEl(s.sel));
+  tourSteps = (isAndroid ? TOUR_ANDROID : TOUR).filter((s) => !s.sel || visibleEl(s.sel));
   tourI = 0;
   $("tour").showPopover();
   drawTour();
 }
 function endTour() {
-  store.set("toured", "1");
+  store.set(TOUR_KEY, "1");
   if ($("tour").matches(":popover-open")) $("tour").hidePopover();
 }
 function drawTour() {
@@ -1535,11 +1579,78 @@ spform.onsubmit = async (e) => {
 const sdlg = $("sdlg"), sform = $("sform");
 let refreshSel = 0;
 
+// Common currencies with their Chinese names, so nobody has to know ISO codes by heart.
+const CURRENCIES = [
+  ["TWD", "台幣", "🇹🇼"], ["USD", "美元", "🇺🇸"], ["JPY", "日圓", "🇯🇵"], ["EUR", "歐元", "🇪🇺"], ["GBP", "英鎊", "🇬🇧"], ["CNY", "人民幣", "🇨🇳"], ["HKD", "港幣", "🇭🇰"],
+  ["KRW", "韓元", "🇰🇷"], ["AUD", "澳幣", "🇦🇺"], ["CAD", "加幣", "🇨🇦"], ["SGD", "新加坡幣", "🇸🇬"], ["CHF", "瑞士法郎", "🇨🇭"], ["NZD", "紐西蘭幣", "🇳🇿"],
+  ["THB", "泰銖", "🇹🇭"], ["MYR", "馬來西亞令吉", "🇲🇾"], ["VND", "越南盾", "🇻🇳"], ["PHP", "菲律賓披索", "🇵🇭"], ["IDR", "印尼盾", "🇮🇩"], ["INR", "印度盧比", "🇮🇳"],
+  ["SEK", "瑞典克朗", "🇸🇪"], ["NOK", "挪威克朗", "🇳🇴"], ["DKK", "丹麥克朗", "🇩🇰"], ["AED", "阿聯迪拉姆", "🇦🇪"], ["TRY", "土耳其里拉", "🇹🇷"], ["ZAR", "南非幣", "🇿🇦"],
+];
+const curInfo = (code) => { const c = CURRENCIES.find((x) => x[0] === code); return c ? { name: c[1], flag: c[2] } : { name: "", flag: "💱" }; };
+const curLabel = (code) => { const i = curInfo(code); return i.name ? `${i.flag} ${i.name}（${code}）` : code; };
+
+const TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>';
 function rateRow(code, val) {
-  const base = code === "TWD";
-  return `<div class="rate-row" data-code="${esc(code)}"><b>${esc(code)}</b>
-    <input type="number" min="0" step="any" value="${val}" ${base ? "disabled" : ""}>
-    ${base ? "<span></span>" : '<button type="button" class="link" data-rm>移除</button>'}</div>`;
+  const base = code === baseCur(), i = curInfo(code), used = data.assets.filter((a) => a.currency === code).length;
+  const right = base ? '<span class="base-note">基準，固定為 1</span>'
+    : used ? `<span class="rm-used" title="有項目正在使用這個幣別，要先改掉那些項目才能移除">使用中 ${used} 項</span>`
+    : `<button type="button" class="rm-btn" data-rm aria-label="移除 ${esc(code)}">${TRASH}移除</button>`;
+  return `<div class="rate-row" data-code="${esc(code)}">
+    <span class="rc"><span>${i.flag}</span><b>${esc(i.name || code)}</b><small>${esc(code)}</small></span>
+    ${right}
+    <span class="rv"><span class="rp">1 ${esc(code)} =</span> <input type="number" min="0" step="any" inputmode="decimal" value="${val}" ${base ? "disabled" : ""}> ${esc(curInfo(baseCur()).name || baseCur())}</span></div>`;
+}
+
+// "Add a currency": pick it by name, the live rate is filled in, then Add.
+let ddRate, rateReq = 0;
+const ratesShown = () => [...document.querySelectorAll("#rates .rate-row")].map((r) => r.dataset.code);
+function refreshRatePicker() {
+  const have = new Set(ratesShown()), before = ddRate.value;
+  ddRate.setOptions([{ value: "", label: "選擇幣別…" }, ...CURRENCIES.filter((c) => !have.has(c[0])).map((c) => ({ value: c[0], label: curLabel(c[0]) })), { value: "__other", label: "其他幣別（自己輸入代碼）…" }], before);
+  if (ddRate.value !== before) rateAddReset(); // what was picked is gone from the list: start the form over, otherwise keep it
+  updateAddState();
+}
+// "加入" is only clickable once there is a valid currency and a rate above 0
+function updateAddState() {
+  const code = rateCode();
+  $("rate-add-btn").disabled = !(/^[A-Z]{2,5}$/.test(code) && parseFloat($("new-rate").value) > 0 && !ratesShown().includes(code));
+}
+function rateAddReset() {
+  $("rate-other").hidden = true; $("new-code").value = $("new-rate").value = ""; $("new-cur").textContent = "—"; $("rate-hint").textContent = ""; $("rate-hint").classList.remove("err");
+  if ($("rate-add-btn")) updateAddState();
+}
+const rateCode = () => (ddRate.value === "__other" ? $("new-code").value.trim().toUpperCase() : ddRate.value);
+async function fetchRateFor(code) {
+  const my = ++rateReq, hint = $("rate-hint");
+  hint.classList.remove("err");
+  if (!/^[A-Z]{2,5}$/.test(code)) { hint.textContent = code ? "幣別代碼需為 2–5 個英文字母" : ""; $("new-cur").textContent = code || "—"; return; }
+  $("new-cur").textContent = code;
+  hint.textContent = "正在查詢即時匯率…";
+  try {
+    const r = await invoke("rate_quote", { code });
+    if (my !== rateReq) return;
+    $("new-rate").value = Number(r.rate.toPrecision(6));
+    updateAddState();
+    hint.textContent = `即時匯率：1 ${code} ≈ ${fmt.format(r.rate)} ${curInfo(baseCur()).name || baseCur()}（可自行修改），確認後按「加入」。`;
+  } catch (err) {
+    if (my !== rateReq) return;
+    console.warn("rate_quote:", err);
+    hint.classList.add("err");
+    hint.textContent = "目前查不到這個幣別的即時匯率，可能是沒有網路或代碼不存在。請自己輸入匯率。";
+  }
+  updateAddState();
+}
+function addRateRow() {
+  const code = rateCode(), v = parseFloat($("new-rate").value), hint = $("rate-hint");
+  hint.classList.add("err");
+  if (!code) return (hint.textContent = "請先選擇要加入的幣別");
+  if (!/^[A-Z]{2,5}$/.test(code)) return (hint.textContent = "幣別代碼需為 2–5 個英文字母");
+  if (ratesShown().includes(code)) return (hint.textContent = `${code} 已經在清單裡了`);
+  if (!(v > 0)) return (hint.textContent = "請輸入匯率（大於 0 的數字）");
+  $("rates").insertAdjacentHTML("beforeend", rateRow(code, v));
+  refreshRatePicker();
+  $("rate-hint").classList.remove("err");
+  $("rate-hint").textContent = `已加入 ${curLabel(code)}，記得按下方「儲存」。`;
 }
 
 function setRefreshSeg(m) {
@@ -1551,11 +1662,17 @@ $("refresh-seg").onclick = (e) => {
   if (b) setRefreshSeg(Number(b.dataset.s));
 };
 
+function fillSettingsRates() {
+  applyBaseLabels();
+  $("base-now").textContent = curLabel(baseCur());
+  $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
+}
 async function openSettings() {
   setRefreshSeg(data.refresh_sec || 0);
-  refreshPeer();
-  $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
-  $("new-code").value = $("new-rate").value = "";
+  fillSettingsRates();
+  ddRate ??= new Dropdown($("rate-pick"), (v) => { $("rate-other").hidden = v !== "__other"; $("new-rate").value = ""; if (v === "__other") { $("new-code").focus(); fetchRateFor(""); } else fetchRateFor(v); });
+  refreshRatePicker();
+  rateAddReset();
   $("serr").textContent = "";
   sdlg.showModal();
   if (inTauri) {
@@ -1565,7 +1682,11 @@ async function openSettings() {
   }
 }
 $("settings-btn").onclick = () => { refreshSecurity(); openSettings(); };
-$("rates").onclick = (e) => e.target.matches("[data-rm]") && e.target.closest(".rate-row").remove();
+$("rates").onclick = (e) => { const b = e.target.closest("[data-rm]"); if (b) { b.closest(".rate-row").remove(); refreshRatePicker(); } };
+$("new-rate").addEventListener("input", updateAddState);
+$("rate-add-btn").onclick = addRateRow;
+let rateTimer = 0;
+$("new-code").oninput = () => { clearTimeout(rateTimer); $("new-code").value = $("new-code").value.toUpperCase(); updateAddState(); rateTimer = setTimeout(() => fetchRateFor($("new-code").value.trim()), 500); };
 
 sform.onsubmit = async (e) => {
   e.preventDefault();
@@ -1574,12 +1695,14 @@ sform.onsubmit = async (e) => {
     const v = r.querySelector("input").value;
     rates[r.dataset.code] = v === "" ? 0 : parseFloat(v);
   });
-  rates.TWD = 1;
-  const code = $("new-code").value.trim().toUpperCase();
-  if (code) {
+  rates[baseCur()] = 1;
+  // a currency that was picked and filled in but not added with "加入" is saved too, so nothing typed is lost
+  const code = rateCode(), pending = parseFloat($("new-rate").value);
+  if (code && pending > 0) {
     if (!/^[A-Z]{2,5}$/.test(code)) return ($("serr").textContent = "幣別代碼需為 2–5 個英文字母");
-    rates[code] = parseFloat($("new-rate").value) || 0;
+    rates[code] = pending;
   }
+  if (Object.values(rates).some((r) => !(r > 0))) return ($("serr").textContent = "每個幣別都需要大於 0 的匯率");
   try {
     data = await invoke("set_settings", {
       rates, refresh_sec: refreshSel,
@@ -1592,6 +1715,71 @@ sform.onsubmit = async (e) => {
     $("serr").textContent = String(err);
   }
 };
+
+/* ---------- main currency ---------- */
+// First start: pick the currency everything is shown in. Settings → 主要幣別 changes it later (stored amounts are converted).
+const basedlg = $("basedlg");
+let ddBase, baseMode = "first", baseAction = "";
+const guessBase = () => {
+  const l = (navigator.language || "").toLowerCase();
+  return l.startsWith("ja") ? "JPY" : l.startsWith("zh-cn") || l === "zh-hans-cn" ? "CNY" : l.startsWith("zh-hk") ? "HKD" : l.startsWith("ko") ? "KRW" : l.startsWith("th") ? "THB"
+    : l.startsWith("en-gb") ? "GBP" : l.startsWith("en") ? "USD" : "TWD";
+};
+function openBaseDialog(mode) {
+  baseMode = mode;
+  baseAction = "";
+  const first = mode === "first";
+  $("base-title").textContent = first ? "選擇你的主要幣別" : "更改主要幣別";
+  $("base-desc").textContent = first
+    ? "總資產、淨資產、目標、月報和記帳都會用這個幣別顯示；美元、日圓等外幣項目會依匯率折算進來。選好之後，隨時可以到「設定」→「主要幣別」更改。"
+    : "更改後，歷史月報、目標與記帳金額會按目前匯率換算成新幣別（會先自動備份）。";
+  $("base-ok").textContent = first ? "開始使用" : "確定更改";
+  $("base-cancel").hidden = first;
+  $("base-connect").hidden = !(first && isAndroid);
+  $("base-err").textContent = "";
+  $("base-hint").textContent = first ? "" : "只能選匯率清單裡已有的幣別；沒有想要的，請先到下方「匯率」加入。";
+  ddBase ??= new Dropdown($("base-pick"), (v) => { $("base-other").hidden = v !== "__other"; if (v === "__other") $("base-code").focus(); });
+  const codes = first ? CURRENCIES.map((c) => c[0]) : Object.keys(data.rates);
+  ddBase.setOptions([...codes.map((c) => ({ value: c, label: curLabel(c) })), ...(first ? [{ value: "__other", label: "其他幣別（自己輸入代碼）…" }] : [])], first ? guessBase() : baseCur());
+  $("base-other").hidden = true;
+  $("base-code").value = "";
+  basedlg.showModal();
+}
+basedlg.addEventListener("cancel", (e) => { if (baseMode === "first") e.preventDefault(); }); // the first choice cannot be skipped with Esc
+$("base-cancel").onclick = () => basedlg.close();
+$("base-connect").onclick = () => { baseAction = "connect"; basedlg.close(); };
+$("baseform").onsubmit = async (e) => {
+  e.preventDefault();
+  const code = ddBase.value === "__other" ? $("base-code").value.trim().toUpperCase() : ddBase.value;
+  const err = $("base-err");
+  if (!/^[A-Z]{2,5}$/.test(code)) return (err.textContent = "幣別代碼需為 2–5 個英文字母");
+  if (baseMode === "change") {
+    if (code === baseCur()) return basedlg.close();
+    const sub = `歷史月報、目標與記帳金額會按目前匯率換算，換算前已備份。${data.peer ? "你有綁定另一台裝置，那台也要改成同一個幣別，才能繼續同步。" : ""}`;
+    if (!(await confirmBox(`把主要幣別改成 ${curLabel(code)}？`, sub, "確定更改"))) return;
+  }
+  $("base-ok").disabled = true;
+  try {
+    data = await invoke("set_base", { code });
+    baseAction = "set";
+    basedlg.close();
+    render();
+    if (sdlg.open) fillSettingsRates();
+    if (baseMode === "change") toast(`主要幣別已改為 ${curLabel(code)}`);
+  } catch (ex) {
+    err.textContent = String(ex);
+  } finally {
+    $("base-ok").disabled = false;
+  }
+};
+$("base-change").onclick = () => openBaseDialog("change");
+let baseReady = Promise.resolve(); // other first-start prompts (update check, remote install) wait for the choice
+function baseFlow() {
+  return new Promise((res) => {
+    openBaseDialog("first");
+    basedlg.addEventListener("close", () => res(baseAction), { once: true });
+  });
+}
 
 /* ---------- quote sync ---------- */
 let refreshing = false, refreshTimer = 0, lastRefresh = 0;
@@ -1950,9 +2138,9 @@ function renderReport() {
     ? `<table class="rp-tbl"><thead><tr><th>標的</th><th>買入</th><th>賣出</th><th>已實現損益</th><th>配息</th></tr></thead><tbody>${rows.map(({ a, t, f }) =>
       `<tr><td>${esc(a.name)}</td><td class="${m}">${t.buy ? fmt0.format(t.buy * f) : "—"}</td><td class="${m}">${t.sell ? fmt0.format(t.sell * f) : "—"}</td>
         <td class="${m} ${t.sell ? (t.realized >= 0 ? "pos" : "neg") : ""}">${t.sell ? signed(t.realized * f) : "—"}</td><td class="${m}">${t.div ? fmt0.format(t.div * f) : "—"}</td></tr>`).join("")}
-      <tr><td><b>合計（TWD）</b></td><td class="${m}"><b>${fmt0.format(tot.buy)}</b></td><td class="${m}"><b>${fmt0.format(tot.sell)}</b></td><td class="${m}"><b>${tot.sell ? signed(tot.realized) : "—"}</b></td><td class="${m}"><b>${fmt0.format(tot.div)}</b></td></tr></tbody></table>`
+      <tr><td><b>合計（${esc(baseCur())}）</b></td><td class="${m}"><b>${fmt0.format(tot.buy)}</b></td><td class="${m}"><b>${fmt0.format(tot.sell)}</b></td><td class="${m}"><b>${tot.sell ? signed(tot.realized) : "—"}</b></td><td class="${m}"><b>${fmt0.format(tot.div)}</b></td></tr></tbody></table>`
     : '<p class="muted">這個月沒有買賣或配息記錄。</p>')
-    + (cur && data.assets.some((a) => a.holding && a.cost > 0) ? `<p class="hint">目前所有持倉的未實現損益：<b class="${unreal >= 0 ? "pos" : "neg"} ${m}">${signed(unreal)} TWD</b>（金額以目前匯率折算，買入含手續費）</p>` : "");
+    + (cur && data.assets.some((a) => a.holding && a.cost > 0) ? `<p class="hint">目前所有持倉的未實現損益：<b class="${unreal >= 0 ? "pos" : "neg"} ${m}">${signed(unreal)} ${esc(baseCur())}</b>（金額以目前匯率折算，買入含手續費）</p>` : "");
 
   // goals
   const goalAt = (g, date) => g.history.filter((p) => p.date <= date).at(-1);
@@ -2078,6 +2266,7 @@ function showPhone(i) {
     : '<p class="muted">找不到區網位址，請確認電腦已連上 Wi-Fi 或網路。</p>';
   $("ph-status").textContent = i.running ? "● 服務執行中" : i.enabled ? "服務未能啟動（連接埠可能被占用，請換一個）" : "未啟用";
   $("ph-status").className = "hint " + (i.running ? "pos" : "");
+  if ($("lan-sum")) $("lan-sum").textContent = i.running ? `服務執行中：${i.urls[0] || "（找不到區網位址）"}　PIN ${i.pin}。手機 App 的「連線」頁輸入這組位址與 PIN 即可綁定。` : i.enabled ? "服務沒有啟動（連接埠可能被占用），請在「手機連線設定」換一個連接埠。" : "尚未啟用。按下面的按鈕開啟「啟用手機連線」。";
   $("phone-btn").classList.toggle("live-lan", i.running);
   $("phone-btn").classList.toggle("live", i.running || $("phone-btn").classList.contains("live-tunnel"));
 }
@@ -2236,7 +2425,7 @@ $("rm-body").onclick = async (e) => {
 
 // after installing MoneyPi, offer once to set up remote access (declining is fine; it can be done later)
 async function offerRemoteInstall() {
-  if (!inTauri || store.get("remote_prompted", "0") === "1") return;
+  if (!inTauri || isAndroid || store.get("remote_prompted", "0") === "1") return;
   if (document.querySelector("dialog[open]") || $("tour").matches(":popover-open")) return setTimeout(offerRemoteInstall, 30000);
   try {
     const s = await invoke("tunnel_status");
@@ -2318,24 +2507,36 @@ document.addEventListener("input", (e) => {
 // the bound device; if that one is on, both sides exchange changes and end up identical. If not, nothing is lost.
 let peer = { bound: false }, peerBusy = false, peerTimer = 0, peerLast = 0, peerErr = ""; // peerErr: why binding just failed
 const hhmm = (ms) => new Date(ms).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false });
+// "today 14:05" / "11/09 14:05"
+const when = (ms) => { const d = new Date(ms), t = hhmm(ms); return d.toDateString() === new Date().toDateString() ? `今天 ${t}` : `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, "0")} ${t}`; };
 function renderPeer() {
-  const chip = $("peer-chip"), st = peer.state || "";
+  const chip = $("peer-chip"), st = peer.state || "", busy = peerBusy || st === "syncing";
   chip.hidden = !inTauri || !peer.bound;
   chip.className = "peer-chip " + (peerBusy ? "syncing" : st);
-  const label = peerBusy || st === "syncing" ? "同步中…" : st === "ok" ? `已同步 ${hhmm(peer.at || Date.now())}`
+  const label = busy ? "同步中…" : st === "ok" ? `已同步 ${hhmm(peer.at || Date.now())}`
     : st === "offline" ? `${peer.name || "對方"}未連線` : st === "denied" || st === "error" ? "同步失敗" : peer.last_sync ? `上次同步 ${hhmm(peer.last_sync)}` : "尚未同步";
   chip.lastElementChild.textContent = label;
-  chip.title = peer.message || `與「${peer.name || ""}」同步：點一下立即同步`;
-  $("peer-text").textContent = peer.bound
-    ? `已綁定：${peer.name || "另一台裝置"}（${peer.url}）。每次開啟 App、回到畫面或修改資料時會自動同步；對方沒開機時，資料先留在這台，之後再同步。`
-    : isAndroid ? "輸入電腦「手機連線」裡的位址與 PIN 後綁定。資料會同時保存在這支手機，沒連上電腦也能照常記帳，連上後自動合併。"
-    : "尚未綁定。請在手機 App 的「設定 → 裝置同步」輸入「手機連線」裡顯示的位址與 PIN，綁定後兩邊會自動同步。";
+  chip.title = peer.message || `與「${peer.name || ""}」同步：點一下查看連線狀態`;
+  // the connection page
+  $("cs-dot").className = !peer.bound ? "" : busy ? "syncing" : st;
+  $("cs-title").textContent = !peer.bound ? "尚未綁定"
+    : busy ? "同步中…" : st === "ok" ? `已連線：${peer.name || "另一台裝置"}` : st === "offline" ? `${peer.name || "對方"}未連線`
+    : st === "denied" || st === "error" ? "同步失敗" : `已綁定：${peer.name || "另一台裝置"}`;
+  $("cs-sub").textContent = peer.bound ? `${peer.url}${peer.last_sync ? `　上次同步 ${when(peer.last_sync)}` : ""}`
+    : isAndroid ? "把這支手機和電腦綁定後，資料會自動雙向同步，沒連上時也能照常使用。"
+    : "還沒有手機綁定。請在手機 App 的「連線」頁，輸入下方「讓手機連線」裡的位址與 PIN。";
   $("peer-unbound").hidden = !isAndroid || peer.bound;
   $("peer-bound").hidden = !peer.bound;
   const bad = st === "denied" || st === "error" || st === "offline";
   $("peer-status").textContent = peerErr || (peer.bound && bad ? peer.message : "");
   $("peer-status").classList.toggle("err", !!peerErr || st === "denied" || st === "error");
 }
+// opening the connection page: refresh what it shows
+function openConnect() {
+  refreshPeer();
+  if (!isAndroid) invoke("get_sync").then(showPhone).catch(() => {});
+}
+
 async function refreshPeer() {
   if (!inTauri) return;
   try { peer = await invoke("peer_info"); } catch {}
@@ -2360,8 +2561,9 @@ function schedulePeerSync() {
   peerTimer = setTimeout(() => syncPeer(false), 4000);
 }
 if (inTauri) {
-  $("peer-chip").onclick = () => syncPeer(true);
+  $("peer-chip").onclick = () => select("connect");
   $("peer-now").onclick = () => syncPeer(true);
+  $("conn-phone").onclick = () => $("phone-btn").click();
   $("peer-bind").onclick = async () => {
     const btn = $("peer-bind");
     btn.disabled = true; peerErr = ""; $("peer-status").classList.remove("err"); $("peer-status").textContent = "連線中…";
@@ -2405,17 +2607,24 @@ async function boot() {
   data = await invoke("get_data");
   render();
   hideSplash();
+  let skipTour = false;
+  if (inTauri && data.base_set === false) { // brand-new install: choose the main currency before anything else
+    baseReady = baseFlow();
+    const how = await baseReady;
+    if (how === "connect") { skipTour = true; select("connect"); } // the phone will take the computer's currency when it syncs
+    else render();
+  }
   refreshPeer().then(() => syncPeer(false)); // on every start: is the bound device on? then sync
   scheduleRefresh();
   if (inTauri && data.refresh_sec > 0) doRefresh(false);
   runPlans(false).then(() => runDividends(false));
   setInterval(() => runPlans(false).then(() => runDividends(false)), 3600e3);
-  if (store.get("toured", "0") !== "1") setTimeout(startTour, 1200);
+  if (!skipTour && store.get(TOUR_KEY, "0") !== "1") setTimeout(startTour, 1200);
 }
 boot().catch((err) => { hideSplash(); toast(String(err)); });
-if (inTauri) {
+if (inTauri && !isAndroid) { // the phone app has no LAN server page, no cloudflared tunnel and no in-app updater
   invoke("get_sync").then(showPhone).catch(() => {});
-  setTimeout(() => checkUpdate(false), 4000);
-  setTimeout(offerRemoteInstall, 9000);
+  setTimeout(() => baseReady.then(() => checkUpdate(false)), 4000);
+  setTimeout(() => baseReady.then(offerRemoteInstall), 9000);
   setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
 }
