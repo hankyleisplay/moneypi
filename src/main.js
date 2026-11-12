@@ -2236,7 +2236,7 @@ $("rm-body").onclick = async (e) => {
 
 // after installing MoneyPi, offer once to set up remote access (declining is fine; it can be done later)
 async function offerRemoteInstall() {
-  if (!inTauri || store.get("remote_prompted", "0") === "1") return;
+  if (!inTauri || isAndroid || store.get("remote_prompted", "0") === "1") return;
   if (document.querySelector("dialog[open]") || $("tour").matches(":popover-open")) return setTimeout(offerRemoteInstall, 30000);
   try {
     const s = await invoke("tunnel_status");
@@ -2413,7 +2413,7 @@ async function boot() {
   if (store.get("toured", "0") !== "1") setTimeout(startTour, 1200);
 }
 boot().catch((err) => { hideSplash(); toast(String(err)); });
-if (inTauri) {
+if (inTauri && !isAndroid) { // the phone app has no LAN server page, no cloudflared tunnel and no in-app updater
   invoke("get_sync").then(showPhone).catch(() => {});
   setTimeout(() => checkUpdate(false), 4000);
   setTimeout(offerRemoteInstall, 9000);

@@ -94,8 +94,9 @@ jobs:
           set -euo pipefail
           echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-          npx tauri icon app-icon.png
           npx tauri android init --ci
+          # the generated project ships Tauri's own launcher icon; replace it with MoneyPi's (made from src-tauri/icons/icon.png)
+          cp -r src-tauri/android-res/. src-tauri/gen/android/app/src/main/res/
 
       - name: Build the APK (64-bit and 32-bit phones)
         run: npx tauri android build --apk --target aarch64 --target armv7 --ci
