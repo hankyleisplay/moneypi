@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 #[cfg(desktop)]
 use tauri_plugin_updater::UpdaterExt;
 
@@ -1069,24 +1070,6 @@ fn external_url(target: &str) -> Result<&str, String> {
         | "https://investor.tsmc.com/chinese" => Ok(target),
         _ => Err("不支援的項目".into()),
     }
-}
-
-fn open_external(target: &str) -> Result<(), String> {
-    let url = external_url(target)?;
-    #[cfg(windows)]
-    let mut c = {
-        use std::os::windows::process::CommandExt;
-        let mut c = Command::new("cmd");
-        c.args(["/C", "start", "", url]);
-        c.creation_flags(0x0800_0000);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut c = { let mut c = Command::new("open"); c.arg(url); c };
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let mut c = { let mut c = Command::new("xdg-open"); c.arg(url); c };
-    let status = c.status().map_err(|e| e.to_string())?;
-    if status.success() { Ok(()) } else { Err("系統瀏覽器無法開啟連結".into()) }
 }
 
 // ---------------------------------------------------------- price history
@@ -2626,6 +2609,22 @@ fn fetch_yahoo(symbol: &str) -> Result<Quote, String> {
     Ok(Quote { price, currency })
 }
 
+/// Live rate of one currency in TWD (Yahoo "USDTWD=X"), for the "add a currency" form.
+fn rate_quote(code: &str) -> Result<Value, String> {
+    let code = code.trim().to_uppercase();
+    if !(2..=5).contains(&code.len()) || !code.chars().all(|c| c.is_ascii_uppercase()) {
+        return Err("幣別代碼需為 2–5 個英文字母".into());
+    }
+    if code == BASE {
+        return Ok(json!({ "code": code, "rate": 1.0 }));
+    }
+    let q = fetch_yahoo(&format!("{code}TWD=X")).map_err(|e| format!("抓不到 {code} 的即時匯率（{e}）"))?;
+    if !q.price.is_finite() || q.price <= 0.0 {
+        return Err(format!("{code} 沒有可用的匯率"));
+    }
+    Ok(json!({ "code": code, "rate": q.price }))
+}
+
 fn fetch_quote(symbol: &str, market: &str) -> Result<Quote, String> {
     if market == "tw" {
         fetch_yahoo(&format!("{symbol}.TW")).or_else(|_| fetch_yahoo(&format!("{symbol}.TWO")))
@@ -2860,6 +2859,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "pair_peer" if !remote => core.pair_peer(&arg::<String>(&args, "link")?, args["pin"].as_str().unwrap_or("")),
         "sync_peer" if !remote => core.sync_peer(),
         "unpair_peer" if !remote => Ok(core.unpair_peer()),
+        "rate_quote" if !remote => rate_quote(&arg::<String>(&args, "code")?),
         "import_tracker" => core.import_tracker(&arg::<String>(&args, "text")?),
         "import_history" => core.import_history(&arg::<String>(&args, "text")?),
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
@@ -2872,7 +2872,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "tunnel_progress" if !remote => Ok(core.tunnel_progress()),
         "open_external" if !remote => {
             let t = arg::<String>(&args, "target")?;
-            if t == "backups" { core.open_backups() } else { open_external(&t) }.map(|_| Value::Null)
+            if t == "backups" { core.open_backups().map(|_| Value::Null) } else { Err("請在應用程式視窗中開啟連結".into()) } // links go through `call` and the opener plugin
         }
         "save_plan" => core.save_plan(arg(&args, "plan")?),
         "delete_plan" => core.delete_plan(arg(&args, "id")?),
@@ -2888,7 +2888,15 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
 }
 
 #[tauri::command]
-async fn call(state: State<'_, Arc<Core>>, cmd: String, args: Value) -> Result<Value, String> {
+async fn call(app: AppHandle, state: State<'_, Arc<Core>>, cmd: String, args: Value) -> Result<Value, String> {
+    // Links open through the opener plugin (system browser, also on Android), after the same whitelist check as before.
+    if cmd == "open_external" {
+        if let Some(t) = args["target"].as_str().filter(|t| *t != "backups") {
+            let url = external_url(t)?;
+            app.opener().open_url(url, None::<&str>).map_err(|e| format!("系統瀏覽器無法開啟連結：{e}"))?;
+            return Ok(Value::Null);
+        }
+    }
     let core = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || dispatch(&core, &cmd, args, false))
         .await
@@ -3124,6 +3132,7 @@ async fn install_update(_app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
+    let builder = builder.plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     builder
@@ -3771,6 +3780,16 @@ mod tests {
         exchange(&pc, &phone);
         assert_eq!(tx_count(&pc, id), tx_count(&phone, id));
         assert_eq!(tx_count(&pc, id).0, 1, "plain last-writer-wins: the phone's later edit replaced the whole asset");
+    }
+
+
+    #[test]
+    fn rate_quote_checks_the_code_before_it_goes_to_the_network() {
+        for bad in ["", "U", "usd1", "USDXYZ", "US D", "../../x", "€"] {
+            assert!(rate_quote(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(rate_quote(" twd ").unwrap()["rate"], 1.0);
+        assert_eq!(rate_quote("twd").unwrap()["code"], "TWD");
     }
 
 

@@ -170,8 +170,22 @@ dialog::backdrop{background:rgba(190,205,240,.35);-webkit-backdrop-filter:blur(5
 form label,form .field{display:block;margin:12px 0 0;color:var(--muted);font-size:13px}
 form label input,form .field .dd{margin-top:4px}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.rate-row{display:grid;grid-template-columns:60px 1fr auto;gap:8px;align-items:center;margin-bottom:6px}
-.add-rate{margin-top:8px}
+.rate-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;align-items:center;padding:8px 0;border-top:1px solid var(--line)}
+.rate-row:first-child{border-top:0}
+.rate-row .rc{display:flex;align-items:baseline;gap:8px;min-width:0}
+.rate-row .rc b{font-size:15px;white-space:nowrap}.rate-row .rc small{color:var(--muted);font-size:12px}
+.rate-row .rv{grid-column:1/-1;display:flex;align-items:center;gap:8px}
+.rate-row .rv input{flex:1;min-width:0}
+.rate-row .rv .rp{min-width:5.4em}
+.rate-row .rv span{color:var(--muted);white-space:nowrap}
+.rate-row .base-note{color:var(--muted);font-size:12px}
+.rate-add{margin-top:12px;padding:12px;border-radius:16px;background:rgba(90,105,160,.07);border:1px dashed var(--line)}
+.rate-add .field{margin:0}
+.rate-line{display:flex;align-items:center;gap:8px;margin-top:10px}
+.rate-line input{flex:1;min-width:0;margin:0!important}
+.rate-line .rl-l,.rate-line .rl-r{color:var(--muted);white-space:nowrap}
+.rate-line .rl-l b{color:var(--fg)}
+#rate-hint.err{color:var(--neg)}
 menu{display:flex;justify-content:flex-end;gap:8px;padding:0;margin:18px 0 0}
 #toast{position:fixed;inset:auto auto 26px 50%;margin:0;width:max-content;max-width:90vw;transform:translateX(-50%);padding:10px 22px;border-radius:999px;color:var(--fg);overflow:visible;animation:toastIn .5s cubic-bezier(.2,.9,.3,1.2)}
 @keyframes toastIn{0%{opacity:0;transform:translateX(-50%) scale(.7,.5) translateY(20px)}60%{opacity:1;transform:translateX(-50%) scale(1.06,1.1)}100%{transform:translateX(-50%)}}
@@ -471,10 +485,29 @@ html.rest *,html.rest *::before,html.rest *::after{animation-play-state:paused!i
 .peer-chip.offline i{background:#e0a030}
 .peer-chip.denied i,.peer-chip.error i{background:var(--neg)}
 @keyframes spPulse{50%{transform:scale(1.7);opacity:.4}}
-#peer-status.err{color:var(--neg)}
-#sdlg .peer-only label{margin-top:8px}
 
 /* ---------- text export / paste dialog (Android cannot download files from the page) ---------- */
 #xdlg textarea{width:100%;font:12px/1.5 ui-monospace,"Cascadia Mono",Consolas,monospace;color:var(--fg);padding:10px 12px;border-radius:14px;background:var(--field);
   border:1px solid var(--line);box-shadow:inset 0 1px 3px rgba(40,55,120,.08);resize:vertical;min-height:140px;margin-top:8px}
 #xdlg textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,107,255,.18);outline:0}
+
+/* ---------- connection page ---------- */
+.conn-status .cs-head{display:flex;align-items:center;gap:14px}
+.conn-status .cs-t{min-width:0}.conn-status .cs-t h3{font-size:18px}
+.conn-status .cs-t p{margin:2px 0 0;word-break:break-all}
+#cs-dot{flex:none;width:16px;height:16px;border-radius:50%;background:#9aa3c4;box-shadow:0 0 0 5px rgba(154,163,196,.22)}
+#cs-dot.ok{background:var(--pos);box-shadow:0 0 0 5px rgba(18,147,90,.2)}
+#cs-dot.syncing{background:var(--accent);box-shadow:0 0 0 5px rgba(47,107,255,.2);animation:spPulse 1s ease-in-out infinite}
+#cs-dot.offline{background:#e0a030;box-shadow:0 0 0 5px rgba(224,160,48,.22)}
+#cs-dot.denied,#cs-dot.error{background:var(--neg);box-shadow:0 0 0 5px rgba(224,52,74,.2)}
+#view-connect .btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+#view-connect .btns button{flex:1 1 150px}
+#view-connect label{display:block;margin-top:12px}
+.steps{margin:10px 0 4px;padding:0;list-style:none;counter-reset:st;display:grid;gap:10px}
+.steps li{counter-increment:st;display:grid;grid-template-columns:26px minmax(0,1fr);gap:10px;align-items:start}
+.steps li::before{content:counter(st);display:grid;place-items:center;width:26px;height:26px;border-radius:50%;font-weight:700;font-size:13px;color:#fff;background:linear-gradient(160deg,#6aa3ff,#6f5cff)}
+ul.plain{margin:8px 0 0;padding-left:18px;display:grid;gap:6px;color:var(--fg)}
+#peer-status.err{color:var(--neg)}
+
+/* phone app: keep clear of the status bar and the gesture bar at every width */
+html.android .app{padding:max(16px,env(safe-area-inset-top),28px) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom),20px) max(16px,env(safe-area-inset-left))}

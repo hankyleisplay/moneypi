@@ -470,6 +470,7 @@ function renderList() {
   $("nav-overview").classList.toggle("on", ui.sel === null);
   $("nav-flow").classList.toggle("on", ui.sel === "flow");
   $("nav-report").classList.toggle("on", ui.sel === "report");
+  $("nav-connect").classList.toggle("on", ui.sel === "connect");
   $("empty").hidden = xs.length > 0;
   $("empty").textContent = data.assets.length ? "沒有符合條件的項目" : "尚無項目，按下方「新增項目」開始記錄";
   $("list").innerHTML = xs
@@ -735,14 +736,16 @@ function holdingHtml(a) {
 
 function renderView() {
   const a = typeof ui.sel === "number" ? data.assets.find((x) => x.id === ui.sel) : null;
-  const flow = ui.sel === "flow", report = ui.sel === "report";
-  $("view-overview").hidden = !!a || flow || report;
+  const flow = ui.sel === "flow", report = ui.sel === "report", connect = ui.sel === "connect";
+  $("view-overview").hidden = !!a || flow || report || connect;
   $("view-detail").hidden = !a;
   $("view-flow").hidden = !flow;
   $("view-report").hidden = !report;
-  $("title").textContent = a ? a.name : flow ? "記帳" : report ? "月報" : "總覽";
+  $("view-connect").hidden = !connect;
+  $("title").textContent = a ? a.name : flow ? "記帳" : report ? "月報" : connect ? "連線" : "總覽";
   if (flow) return renderFlow();
   if (report) return renderReport();
+  if (connect) return openConnect();
   if (!a) return drawCharts();
 
   const pool = sum(data.assets.filter((x) => x.liability === a.liability));
@@ -777,6 +780,7 @@ function select(id) {
 $("nav-overview").onclick = () => select(null);
 $("nav-flow").onclick = () => select("flow");
 $("nav-report").onclick = () => select("report");
+$("nav-connect").onclick = () => select("connect");
 $("list").onclick = (e) => {
   const b = e.target.closest(".item");
   if (b) select(Number(b.dataset.id));
@@ -1077,7 +1081,7 @@ function openDialog(asset) {
   $("err").textContent = "";
   const cats = asset && !CATS.includes(asset.category) ? [...CATS, asset.category] : CATS;
   fCat.setOptions(cats, asset ? asset.category : CATS[0]);
-  fCur.setOptions(Object.keys(data.rates), asset ? asset.currency : "TWD");
+  fCur.setOptions(Object.keys(data.rates).map((c) => ({ value: c, label: curLabel(c) })), asset ? asset.currency : "TWD");
   fMkt.setOptions(fMkt.opts, asset ? asset.market : "");
   if (asset) {
     form.name.value = asset.name;
@@ -1397,12 +1401,28 @@ const TOUR = [
   { sel: "#nav-overview", t: "總覽", d: "看淨資產走勢、資產配置、投資組合與目標進度，也可以在這裡設定多個目標。" },
   { sel: "#nav-flow", t: "記帳", d: "記錄每天的收入與支出，查看每月統計。" },
   { sel: "#nav-report", t: "月報", d: "每個月一份：淨資產變多少、存了多少、買賣與配息、各目標的進度，以及預估何時達成。" },
+  { sel: "#nav-connect", t: "連線", d: "看手機有沒有綁定、同步狀態，也可以從這裡開啟「手機連線」。" },
   { sel: "#refresh-btn", t: "同步股價與匯率", d: "有設定行情代號的股票、ETF 會抓最新報價，外幣也會更新匯率。自動更新的間隔在「設定」裡調整。" },
   { sel: "#hide-btn", t: "隱藏金額", d: "在公共場合想遮住數字，就按這裡。" },
-  { sel: "#phone-btn", t: "手機連線", d: "用手機查看同一份資料：同一個 Wi-Fi 掃 QR Code，或用「遠端」在外面也能連。" },
+  { sel: "#phone-btn", t: "手機連線", d: "用手機 App 連回這台電腦：同一個 Wi-Fi 掃 QR Code 或輸入位址與 PIN，或用「遠端」在外面也能連。綁定後兩邊會自動同步。" },
   { sel: "#settings-btn", t: "設定", d: "匯率、自動更新、備份與還原、檢查更新都在這裡。" },
   { sel: "#help-btn", t: "隨時看說明", d: "名詞旁邊有 ? 的，點一下就會解釋。完整教學在這個按鈕裡，也可以重新播放這個導覽。" },
 ];
+const TOUR_ANDROID = [
+  { t: "歡迎使用 MoneyPi 手機版", d: "資料存在這支手機裡，沒有網路、沒開電腦也能新增項目與記帳。想要的話可以綁定你的電腦，兩邊會自動同步。花 30 秒看一下怎麼用？" },
+  { sel: "#add-btn", t: "新增項目", d: "存款、現金、股票、ETF、基金、貸款都從這裡新增。股票、基金請在類別選「股票」或「基金/ETF」，再用「記錄交易」輸入買賣，成本與損益會自動算出來。" },
+  { sel: "#list", t: "你的項目清單", d: "新增的項目會列在這裡，點一下看現值、成本、損益、交易記錄與走勢。" },
+  { sel: "#nav-overview", t: "總覽", d: "淨資產走勢、資產配置、投資組合與目標進度都在這裡。" },
+  { sel: "#nav-flow", t: "記帳", d: "記錄每天的收入與支出，查看每月統計。" },
+  { sel: "#nav-report", t: "月報", d: "每個月一份：淨資產變多少、存了多少、買賣與配息，以及各目標的進度。" },
+  { sel: "#nav-connect", t: "連線：綁定你的電腦", d: "在這裡輸入電腦「手機連線」裡的位址與 PIN 就能綁定。之後每次開啟 App 會自動找電腦同步；電腦沒開也沒關係，資料先留在手機，連上再合併。" },
+  { sel: "#peer-chip", t: "同步狀態", d: "這個小標籤顯示「已同步」「同步中」或「電腦未連線」，點一下可以看詳細狀態並立即同步。" },
+  { sel: "#refresh-btn", t: "同步股價與匯率", d: "有網路時按這裡更新報價與匯率。也可以到「設定」開啟自動更新。" },
+  { sel: "#hide-btn", t: "隱藏金額", d: "在公共場合想遮住數字，就按這裡。" },
+  { sel: "#settings-btn", t: "設定", d: "匯率（可以直接從清單選幣別）、自動更新間隔、匯出備份（顯示文字讓你複製）和還原都在這裡。" },
+  { sel: "#help-btn", t: "隨時看說明", d: "這裡有手機版專屬的教學，例如怎麼綁定電腦、連不上怎麼辦，也能重新播放這個導覽。" },
+];
+const TOUR_KEY = isAndroid ? "toured_android" : "toured"; // the phone app has its own tour, shown once more after the update
 let tourSteps = [], tourI = 0;
 const visibleEl = (sel) => {
   const el = document.querySelector(sel);
@@ -1412,13 +1432,13 @@ const visibleEl = (sel) => {
 };
 function startTour() {
   if (document.querySelector("dialog[open]")) return;
-  tourSteps = TOUR.filter((s) => !s.sel || visibleEl(s.sel));
+  tourSteps = (isAndroid ? TOUR_ANDROID : TOUR).filter((s) => !s.sel || visibleEl(s.sel));
   tourI = 0;
   $("tour").showPopover();
   drawTour();
 }
 function endTour() {
-  store.set("toured", "1");
+  store.set(TOUR_KEY, "1");
   if ($("tour").matches(":popover-open")) $("tour").hidePopover();
 }
 function drawTour() {
@@ -1535,11 +1555,64 @@ spform.onsubmit = async (e) => {
 const sdlg = $("sdlg"), sform = $("sform");
 let refreshSel = 0;
 
+// Common currencies with their Chinese names, so nobody has to know ISO codes by heart.
+const CURRENCIES = [
+  ["USD", "美元", "🇺🇸"], ["JPY", "日圓", "🇯🇵"], ["EUR", "歐元", "🇪🇺"], ["GBP", "英鎊", "🇬🇧"], ["CNY", "人民幣", "🇨🇳"], ["HKD", "港幣", "🇭🇰"],
+  ["KRW", "韓元", "🇰🇷"], ["AUD", "澳幣", "🇦🇺"], ["CAD", "加幣", "🇨🇦"], ["SGD", "新加坡幣", "🇸🇬"], ["CHF", "瑞士法郎", "🇨🇭"], ["NZD", "紐西蘭幣", "🇳🇿"],
+  ["THB", "泰銖", "🇹🇭"], ["MYR", "馬來西亞令吉", "🇲🇾"], ["VND", "越南盾", "🇻🇳"], ["PHP", "菲律賓披索", "🇵🇭"], ["IDR", "印尼盾", "🇮🇩"], ["INR", "印度盧比", "🇮🇳"],
+  ["SEK", "瑞典克朗", "🇸🇪"], ["NOK", "挪威克朗", "🇳🇴"], ["DKK", "丹麥克朗", "🇩🇰"], ["AED", "阿聯迪拉姆", "🇦🇪"], ["TRY", "土耳其里拉", "🇹🇷"], ["ZAR", "南非幣", "🇿🇦"],
+];
+const curInfo = (code) => { const c = CURRENCIES.find((x) => x[0] === code); return c ? { name: c[1], flag: c[2] } : code === "TWD" ? { name: "台幣", flag: "🇹🇼" } : { name: "", flag: "💱" }; };
+const curLabel = (code) => { const i = curInfo(code); return i.name ? `${i.flag} ${i.name}（${code}）` : code; };
+
 function rateRow(code, val) {
-  const base = code === "TWD";
-  return `<div class="rate-row" data-code="${esc(code)}"><b>${esc(code)}</b>
-    <input type="number" min="0" step="any" value="${val}" ${base ? "disabled" : ""}>
-    ${base ? "<span></span>" : '<button type="button" class="link" data-rm>移除</button>'}</div>`;
+  const base = code === "TWD", i = curInfo(code);
+  return `<div class="rate-row" data-code="${esc(code)}">
+    <span class="rc"><span>${i.flag}</span><b>${esc(i.name || code)}</b><small>${esc(code)}</small></span>
+    ${base ? '<span class="base-note">基準，固定為 1</span>' : '<button type="button" class="link" data-rm>移除</button>'}
+    <span class="rv"><span class="rp">1 ${esc(code)} =</span> <input type="number" min="0" step="any" inputmode="decimal" value="${val}" ${base ? "disabled" : ""}> 台幣</span></div>`;
+}
+
+// "Add a currency": pick it by name, the live rate is filled in, then Add.
+let ddRate, rateReq = 0;
+const ratesShown = () => [...document.querySelectorAll("#rates .rate-row")].map((r) => r.dataset.code);
+function refreshRatePicker() {
+  const have = new Set(ratesShown());
+  ddRate.setOptions([{ value: "", label: "選擇幣別…" }, ...CURRENCIES.filter((c) => !have.has(c[0])).map((c) => ({ value: c[0], label: curLabel(c[0]) })), { value: "__other", label: "其他幣別（自己輸入代碼）…" }], "");
+  rateAddReset();
+}
+function rateAddReset() {
+  $("rate-other").hidden = true; $("new-code").value = $("new-rate").value = ""; $("new-cur").textContent = "—"; $("rate-hint").textContent = ""; $("rate-hint").classList.remove("err");
+}
+const rateCode = () => (ddRate.value === "__other" ? $("new-code").value.trim().toUpperCase() : ddRate.value);
+async function fetchRateFor(code) {
+  const my = ++rateReq, hint = $("rate-hint");
+  hint.classList.remove("err");
+  if (!/^[A-Z]{2,5}$/.test(code)) { hint.textContent = code ? "幣別代碼需為 2–5 個英文字母" : ""; $("new-cur").textContent = code || "—"; return; }
+  $("new-cur").textContent = code;
+  hint.textContent = "正在查詢即時匯率…";
+  try {
+    const r = await invoke("rate_quote", { code });
+    if (my !== rateReq) return;
+    $("new-rate").value = Number(r.rate.toPrecision(6));
+    hint.textContent = `即時匯率：1 ${code} ≈ ${fmt.format(r.rate)} 台幣（可自行修改），確認後按「加入」。`;
+  } catch (err) {
+    if (my !== rateReq) return;
+    hint.classList.add("err");
+    hint.textContent = `${String(err)}。請自己輸入匯率。`;
+  }
+}
+function addRateRow() {
+  const code = rateCode(), v = parseFloat($("new-rate").value), hint = $("rate-hint");
+  hint.classList.add("err");
+  if (!code) return (hint.textContent = "請先選擇要加入的幣別");
+  if (!/^[A-Z]{2,5}$/.test(code)) return (hint.textContent = "幣別代碼需為 2–5 個英文字母");
+  if (ratesShown().includes(code)) return (hint.textContent = `${code} 已經在清單裡了`);
+  if (!(v > 0)) return (hint.textContent = "請輸入匯率（大於 0 的數字）");
+  $("rates").insertAdjacentHTML("beforeend", rateRow(code, v));
+  refreshRatePicker();
+  $("rate-hint").classList.remove("err");
+  $("rate-hint").textContent = `已加入 ${curLabel(code)}，記得按下方「儲存」。`;
 }
 
 function setRefreshSeg(m) {
@@ -1553,9 +1626,9 @@ $("refresh-seg").onclick = (e) => {
 
 async function openSettings() {
   setRefreshSeg(data.refresh_sec || 0);
-  refreshPeer();
   $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
-  $("new-code").value = $("new-rate").value = "";
+  ddRate ??= new Dropdown($("rate-pick"), (v) => { $("rate-other").hidden = v !== "__other"; $("new-rate").value = ""; if (v === "__other") { $("new-code").focus(); fetchRateFor(""); } else fetchRateFor(v); });
+  refreshRatePicker();
   $("serr").textContent = "";
   sdlg.showModal();
   if (inTauri) {
@@ -1565,7 +1638,10 @@ async function openSettings() {
   }
 }
 $("settings-btn").onclick = () => { refreshSecurity(); openSettings(); };
-$("rates").onclick = (e) => e.target.matches("[data-rm]") && e.target.closest(".rate-row").remove();
+$("rates").onclick = (e) => { if (e.target.matches("[data-rm]")) { e.target.closest(".rate-row").remove(); refreshRatePicker(); } };
+$("rate-add-btn").onclick = addRateRow;
+let rateTimer = 0;
+$("new-code").oninput = () => { clearTimeout(rateTimer); $("new-code").value = $("new-code").value.toUpperCase(); rateTimer = setTimeout(() => fetchRateFor($("new-code").value.trim()), 500); };
 
 sform.onsubmit = async (e) => {
   e.preventDefault();
@@ -1575,11 +1651,13 @@ sform.onsubmit = async (e) => {
     rates[r.dataset.code] = v === "" ? 0 : parseFloat(v);
   });
   rates.TWD = 1;
-  const code = $("new-code").value.trim().toUpperCase();
-  if (code) {
+  // a currency that was picked and filled in but not added with "加入" is saved too, so nothing typed is lost
+  const code = rateCode(), pending = parseFloat($("new-rate").value);
+  if (code && pending > 0) {
     if (!/^[A-Z]{2,5}$/.test(code)) return ($("serr").textContent = "幣別代碼需為 2–5 個英文字母");
-    rates[code] = parseFloat($("new-rate").value) || 0;
+    rates[code] = pending;
   }
+  if (Object.values(rates).some((r) => !(r > 0))) return ($("serr").textContent = "每個幣別都需要大於 0 的匯率");
   try {
     data = await invoke("set_settings", {
       rates, refresh_sec: refreshSel,
@@ -2078,6 +2156,7 @@ function showPhone(i) {
     : '<p class="muted">找不到區網位址，請確認電腦已連上 Wi-Fi 或網路。</p>';
   $("ph-status").textContent = i.running ? "● 服務執行中" : i.enabled ? "服務未能啟動（連接埠可能被占用，請換一個）" : "未啟用";
   $("ph-status").className = "hint " + (i.running ? "pos" : "");
+  if ($("lan-sum")) $("lan-sum").textContent = i.running ? `服務執行中：${i.urls[0] || "（找不到區網位址）"}　PIN ${i.pin}。手機 App 的「連線」頁輸入這組位址與 PIN 即可綁定。` : i.enabled ? "服務沒有啟動（連接埠可能被占用），請在「手機連線設定」換一個連接埠。" : "尚未啟用。按下面的按鈕開啟「啟用手機連線」。";
   $("phone-btn").classList.toggle("live-lan", i.running);
   $("phone-btn").classList.toggle("live", i.running || $("phone-btn").classList.contains("live-tunnel"));
 }
@@ -2318,24 +2397,36 @@ document.addEventListener("input", (e) => {
 // the bound device; if that one is on, both sides exchange changes and end up identical. If not, nothing is lost.
 let peer = { bound: false }, peerBusy = false, peerTimer = 0, peerLast = 0, peerErr = ""; // peerErr: why binding just failed
 const hhmm = (ms) => new Date(ms).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", hour12: false });
+// "today 14:05" / "11/09 14:05"
+const when = (ms) => { const d = new Date(ms), t = hhmm(ms); return d.toDateString() === new Date().toDateString() ? `今天 ${t}` : `${d.getMonth() + 1}/${String(d.getDate()).padStart(2, "0")} ${t}`; };
 function renderPeer() {
-  const chip = $("peer-chip"), st = peer.state || "";
+  const chip = $("peer-chip"), st = peer.state || "", busy = peerBusy || st === "syncing";
   chip.hidden = !inTauri || !peer.bound;
   chip.className = "peer-chip " + (peerBusy ? "syncing" : st);
-  const label = peerBusy || st === "syncing" ? "同步中…" : st === "ok" ? `已同步 ${hhmm(peer.at || Date.now())}`
+  const label = busy ? "同步中…" : st === "ok" ? `已同步 ${hhmm(peer.at || Date.now())}`
     : st === "offline" ? `${peer.name || "對方"}未連線` : st === "denied" || st === "error" ? "同步失敗" : peer.last_sync ? `上次同步 ${hhmm(peer.last_sync)}` : "尚未同步";
   chip.lastElementChild.textContent = label;
-  chip.title = peer.message || `與「${peer.name || ""}」同步：點一下立即同步`;
-  $("peer-text").textContent = peer.bound
-    ? `已綁定：${peer.name || "另一台裝置"}（${peer.url}）。每次開啟 App、回到畫面或修改資料時會自動同步；對方沒開機時，資料先留在這台，之後再同步。`
-    : isAndroid ? "輸入電腦「手機連線」裡的位址與 PIN 後綁定。資料會同時保存在這支手機，沒連上電腦也能照常記帳，連上後自動合併。"
-    : "尚未綁定。請在手機 App 的「設定 → 裝置同步」輸入「手機連線」裡顯示的位址與 PIN，綁定後兩邊會自動同步。";
+  chip.title = peer.message || `與「${peer.name || ""}」同步：點一下查看連線狀態`;
+  // the connection page
+  $("cs-dot").className = !peer.bound ? "" : busy ? "syncing" : st;
+  $("cs-title").textContent = !peer.bound ? "尚未綁定"
+    : busy ? "同步中…" : st === "ok" ? `已連線：${peer.name || "另一台裝置"}` : st === "offline" ? `${peer.name || "對方"}未連線`
+    : st === "denied" || st === "error" ? "同步失敗" : `已綁定：${peer.name || "另一台裝置"}`;
+  $("cs-sub").textContent = peer.bound ? `${peer.url}${peer.last_sync ? `　上次同步 ${when(peer.last_sync)}` : ""}`
+    : isAndroid ? "把這支手機和電腦綁定後，資料會自動雙向同步，沒連上時也能照常使用。"
+    : "還沒有手機綁定。請在手機 App 的「連線」頁，輸入下方「讓手機連線」裡的位址與 PIN。";
   $("peer-unbound").hidden = !isAndroid || peer.bound;
   $("peer-bound").hidden = !peer.bound;
   const bad = st === "denied" || st === "error" || st === "offline";
   $("peer-status").textContent = peerErr || (peer.bound && bad ? peer.message : "");
   $("peer-status").classList.toggle("err", !!peerErr || st === "denied" || st === "error");
 }
+// opening the connection page: refresh what it shows
+function openConnect() {
+  refreshPeer();
+  if (!isAndroid) invoke("get_sync").then(showPhone).catch(() => {});
+}
+
 async function refreshPeer() {
   if (!inTauri) return;
   try { peer = await invoke("peer_info"); } catch {}
@@ -2360,8 +2451,9 @@ function schedulePeerSync() {
   peerTimer = setTimeout(() => syncPeer(false), 4000);
 }
 if (inTauri) {
-  $("peer-chip").onclick = () => syncPeer(true);
+  $("peer-chip").onclick = () => select("connect");
   $("peer-now").onclick = () => syncPeer(true);
+  $("conn-phone").onclick = () => $("phone-btn").click();
   $("peer-bind").onclick = async () => {
     const btn = $("peer-bind");
     btn.disabled = true; peerErr = ""; $("peer-status").classList.remove("err"); $("peer-status").textContent = "連線中…";
@@ -2410,7 +2502,7 @@ async function boot() {
   if (inTauri && data.refresh_sec > 0) doRefresh(false);
   runPlans(false).then(() => runDividends(false));
   setInterval(() => runPlans(false).then(() => runDividends(false)), 3600e3);
-  if (store.get("toured", "0") !== "1") setTimeout(startTour, 1200);
+  if (store.get(TOUR_KEY, "0") !== "1") setTimeout(startTour, 1200);
 }
 boot().catch((err) => { hideSplash(); toast(String(err)); });
 if (inTauri && !isAndroid) { // the phone app has no LAN server page, no cloudflared tunnel and no in-app updater
