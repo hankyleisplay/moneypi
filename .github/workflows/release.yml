@@ -92,7 +92,7 @@ jobs:
             id=${found% *}
             [ "${found#* }" = "true" ] || { echo "::error::v$VERSION is already published"; exit 1; }
             # A leftover draft still points at the commit of the failed run; the tag must land on this one.
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$id" -f target_commitish="$GITHUB_SHA" -F prerelease="$PRE" --silent
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$id" -f tag_name="v$VERSION" -f target_commitish="$GITHUB_SHA" -F prerelease="$PRE" --silent
           fi
           [[ "$id" =~ ^[0-9]+$ ]] || { echo "::error::could not create or find the draft release v$VERSION (got '$id')"; exit 1; }
           echo "id=$id" >> "$GITHUB_OUTPUT"
