@@ -1,6 +1,6 @@
 {
   "name": "moneypi",
-  "version": "0.22.0-preview.2",
+  "version": "0.22.0-preview.3",
   "private": true,
   "scripts": {
     "tauri": "tauri",

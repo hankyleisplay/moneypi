@@ -1,6 +1,6 @@
 [package]
 name = "moneypi"
-version = "0.22.0-preview.2"
+version = "0.22.0-preview.3"
 edition = "2021"
 
 [lib]
