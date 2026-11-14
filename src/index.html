@@ -9,6 +9,8 @@
 <meta name="apple-mobile-web-app-title" content="MoneyPi">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="manifest" href="manifest.webmanifest">
+<script>/* apply the dark theme before the first paint (no white flash); main.js keeps it up to date */
+try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t === "auto" && matchMedia("(prefers-color-scheme: dark)").matches)) document.documentElement.classList.add("dark"); } catch (e) {}</script>
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <title>MoneyPi 資產追蹤</title>
@@ -136,6 +138,10 @@
           <ul id="legend"></ul>
         </div>
       </section>
+      <section class="glass panel" id="rebal-panel">
+        <div class="panel-head"><h3>目標配置與再平衡</h3><button type="button" id="alloc-edit">設定目標</button></div>
+        <div id="rebal"></div>
+      </section>
       <section class="glass panel invest-panel" aria-labelledby="invest-title">
         <div class="panel-head"><div><span class="eyebrow">INVESTMENT IDEAS</span><h3 id="invest-title">找到適合你的下一步</h3></div>
           <div class="invest-select"><span id="invest-risk-label">投資風格</span><div class="dd" id="invest-risk" aria-labelledby="invest-risk-label"></div></div>
@@ -164,6 +170,18 @@
       <div class="glass panel"><h3>投資</h3><div id="rp-inv"></div></div>
       <div class="glass panel"><h3>目標進度</h3><div id="rp-goals"></div></div>
       <div class="glass panel"><h3>支出前幾名</h3><div class="bars" id="rp-cats"></div></div>
+      <div class="glass panel" id="fire-panel">
+        <div class="panel-head"><h3>財務自由試算</h3><button type="button" class="link" id="fire-reset">用我的資料重算</button></div>
+        <p class="hint">用「4% 法則」這類常見的經驗值，估算要存到多少錢、照目前速度大約何時能靠資產支付生活費。空白的欄位會用你的記帳與資產資料自動帶入。</p>
+        <div class="fire-in">
+          <label>每月生活費<input id="fire-exp" type="number" min="0" step="any" inputmode="decimal"></label>
+          <label>每月可存<input id="fire-save" type="number" step="any" inputmode="decimal"></label>
+          <label>預期年報酬率 %<input id="fire-ret" type="number" step="any" inputmode="decimal" placeholder="5"></label>
+          <label>提領率 %<input id="fire-wr" type="number" min="0.5" step="any" inputmode="decimal" placeholder="4"></label>
+        </div>
+        <div class="stats" id="fire-out"></div>
+        <p class="note">只是試算：未來的報酬、通膨與生活費都會變動，不構成投資建議。</p>
+      </div>
     </div>
 
     <div id="view-connect" class="view" hidden>
@@ -210,8 +228,22 @@
         </div>
         <div class="stats" id="flow-sum"></div>
       </div>
+      <div class="glass panel">
+        <div class="panel-head"><h3>本月預算 <span class="muted" id="budget-pace"></span></h3><button type="button" id="budget-edit">設定預算</button></div>
+        <div id="budget-list"></div>
+      </div>
+      <div class="glass panel">
+        <div class="panel-head"><h3>近 12 個月收支</h3><span class="ft-legend"><i class="in"></i>收入 <i class="out"></i>支出</span></div>
+        <div class="ftrend" id="flow-trend"></div>
+        <p class="hint">點一個月份可以切換到那個月。</p>
+      </div>
       <div class="glass panel"><h3>支出分類</h3><div class="bars" id="flow-cats"></div></div>
-      <div class="glass panel"><h3>明細 <span class="muted" id="flow-count"></span></h3><div id="flow-list"></div></div>
+      <div class="glass panel">
+        <div class="panel-head"><h3>明細 <span class="muted" id="flow-count"></span></h3><button type="button" id="flow-csv">匯出 CSV</button></div>
+        <input id="flow-q" type="search" placeholder="搜尋備註或類別（會找所有月份）" autocomplete="off">
+        <div id="flow-qsum" class="muted"></div>
+        <div id="flow-list"></div>
+      </div>
     </div>
   </section>
 </div>
@@ -257,6 +289,7 @@
   <form method="dialog" id="fform">
     <h3>記一筆</h3>
     <div class="seg" id="f-kind"><button type="button" data-k="out" class="on">支出</button><button type="button" data-k="in">收入</button></div>
+    <div class="chips" id="f-sugg"></div>
     <label>日期<input name="date" placeholder="YYYY-MM-DD" required autocomplete="off"></label>
     <div class="two">
       <label>金額（<span class="b-sym">NT$</span>）<input name="amount" type="number" min="0" step="any" required></label>
@@ -308,6 +341,14 @@
       <p>第一次開啟時選的幣別就是<b>主要幣別</b>：總資產、淨資產、目標、月報和記帳都用它顯示；美元、日圓等外幣項目會依「設定」裡的匯率折算進來。</p>
       <p>之後想換，到<b>「設定」→「主要幣別」→「更改」</b>。換的時候，歷史月報、目標和記帳金額會按目前匯率換算成新幣別（會先自動備份）。</p>
       <p>電腦和手機要用<b>同一個主要幣別</b>才能同步；全新的手機連上電腦後，會自動沿用電腦的幣別。</p>
+    </details>
+
+    <details class="help"><summary>預算、目標配置、財務自由試算與深色模式</summary>
+      <p><b>每月預算：</b>到「記帳」按「設定預算」，替每個支出類別設每月上限。快用完會變黃、超過會變紅，記一筆時也會提醒；細線是「本月已過幾 %」，方便看花錢速度。</p>
+      <p><b>目標配置與再平衡：</b>在「總覽」按「設定目標」，設定每類資產想佔總資產幾 %，就會算出目前偏離多少、要買或賣多少才回到目標（±2% 內算已接近）。</p>
+      <p><b>財務自由試算：</b>在「月報」最下面。用每月生活費、每月可存、預期報酬率與提領率，估算需要多少錢、大約何時達成；空白欄位會用你的記帳資料自動帶入。</p>
+      <p><b>記帳的小幫手：</b>近 12 個月收支圖（點月份可切換）、搜尋所有月份的備註與類別、把目前的明細匯出成 CSV；「記一筆」會列出你常記的項目，點一下就填好。</p>
+      <p><b>深色模式：</b>「設定 → 外觀」可選自動（跟系統）、淺色或深色。這是每台裝置自己的設定；預算與目標配置則會跟綁定的裝置同步。</p>
     </details>
 
     <details class="help peer-only" hidden><summary>更新與「預覽版」頻道</summary>
@@ -469,6 +510,12 @@
 <dialog id="sdlg" class="glass">
   <form method="dialog" id="sform">
     <h3>設定</h3>
+
+    <h4>外觀</h4>
+    <div class="seg" id="theme-seg">
+      <button type="button" data-t="auto">自動</button><button type="button" data-t="light">淺色</button><button type="button" data-t="dark">深色</button>
+    </div>
+    <p class="hint" id="theme-hint"></p>
 
     <h4>效能模式</h4>
     <div class="seg" id="perf-seg">
@@ -633,6 +680,27 @@
     <p id="base-err" class="neg"></p>
     <menu><button type="button" id="base-cancel" hidden>取消</button><button type="submit" class="primary" id="base-ok">開始使用</button></menu>
     <button type="button" class="link droid-only" id="base-connect" hidden>已經有電腦版？先去連線，幣別會跟電腦一致</button>
+  </form>
+</dialog>
+
+<dialog id="bdlg" class="glass">
+  <form method="dialog" id="bform">
+    <h3>每月預算</h3>
+    <p class="hint">每個支出類別每月最多想花多少（<span class="b-name">台幣</span>）。留空或 0 表示不設預算。快超過或超過時，記帳頁會用顏色提醒，記一筆時也會告訴你。預算會跟綁定的另一台裝置同步。</p>
+    <div id="bfields" class="bfields"></div>
+    <p id="berr" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
+  </form>
+</dialog>
+
+<dialog id="adlg" class="glass">
+  <form method="dialog" id="aform">
+    <h3>目標配置</h3>
+    <p class="hint">想讓每一類資產佔總資產幾 %（不含負債）。留空或 0 表示這類不設目標；加起來不能超過 100%。設定後總覽會算出要買或賣多少才回到目標。會跟綁定的另一台裝置同步。</p>
+    <div id="afields" class="bfields"></div>
+    <p class="hint" id="asum"></p>
+    <p id="aerr" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
   </form>
 </dialog>
 

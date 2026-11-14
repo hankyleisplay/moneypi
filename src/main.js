@@ -463,6 +463,7 @@ function render() {
   renderGoalHero();
   renderGoals();
   renderPortfolio();
+  renderRebalance();
   renderInvestmentIdeas();
 
   const cats = [...new Set(data.assets.map((a) => a.category))].sort();
@@ -647,7 +648,7 @@ function drawForecast(a, s) {
   g.setLineDash([]);
   g.strokeStyle = "rgba(90,105,160,.4)"; g.beginPath(); g.moveTo(nowX, padT); g.lineTo(nowX, H - padB); g.stroke();
   // actual closes
-  g.strokeStyle = "#1b2340"; g.lineWidth = 1.6; g.lineJoin = "round";
+  g.strokeStyle = css("--fg"); g.lineWidth = 1.6; g.lineJoin = "round";
   g.beginPath(); pts.forEach((p, i) => (i ? g.lineTo(X(day(p[0])), Y(p[1])) : g.moveTo(X(day(p[0])), Y(p[1])))); g.stroke();
   // my average cost
   if (avg) {
@@ -1016,6 +1017,72 @@ function drawAlloc() {
   g.fillText(ui.hidden ? "••••" : fmt0.format(total), cx, cy + 16);
 }
 
+/* ---------- target allocation and rebalancing ---------- */
+// Current share of each asset category (by value in the base currency) against the targets (shared prefs). Within ±2
+// percentage points counts as on target; otherwise the amount to buy or sell to get back is shown.
+function renderRebalance() {
+  const T = (data.prefs && data.prefs.alloc) || {}, keys = Object.keys(T), m = mask();
+  if (!keys.length) {
+    $("rebal").innerHTML = '<p class="muted">設定每類資產想佔多少 %，這裡會算出目前偏離多少、要買或賣多少才回到目標。</p>';
+    return;
+  }
+  const by = {};
+  data.assets.filter((a) => !a.liability).forEach((a) => (by[a.category] = (by[a.category] || 0) + toBase(a)));
+  const total = Object.values(by).reduce((s, v) => s + v, 0);
+  const cats = [...new Set([...keys, ...Object.keys(by).filter((k) => by[k] > 0)])];
+  const rows = cats.map((c) => {
+    const cur = by[c] || 0, pc = total > 0 ? (cur / total) * 100 : 0, tg = T[c] || 0, diff = (tg / 100) * total - cur;
+    return { c, cur, pc, tg, diff, has: c in T };
+  }).sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+  const sumT = keys.reduce((s, k) => s + T[k], 0);
+  $("rebal").innerHTML = rows.map((r) => {
+    const off = r.has ? r.pc - r.tg : null;
+    const act = !r.has ? '<span class="muted">未設目標</span>'
+      : Math.abs(off) <= 2 ? '<span class="pos">已接近目標</span>'
+      : r.diff > 0 ? `<span class="pos">買入 <b class="${m}">${money(r.diff)}</b></span>` : `<span class="neg">賣出 <b class="${m}">${money(-r.diff)}</b></span>`;
+    return `<div class="rrow"><span class="rname"><i style="background:${catColor(r.c)}"></i>${esc(r.c)}</span>
+      <span class="rtrack"><i style="width:${Math.min(r.pc, 100)}%;background:${catColor(r.c)}"></i>${r.has ? `<b class="rtarget" style="left:${r.tg}%" title="目標 ${r.tg}%"></b>` : ""}</span>
+      <span class="rpct">${r.pc.toFixed(1)}%${r.has ? ` <span class="muted">/ ${fmt.format(r.tg)}%</span>` : ""}</span>
+      <span class="ract">${act}</span></div>`;
+  }).join("")
+    + `<p class="note">直條是目前比例，細線是目標。${sumT < 100 ? `目標合計 ${fmt.format(sumT)}%，其餘 ${fmt.format(100 - sumT)}% 未指定。` : ""}金額以目前總資產${ui.hidden ? "" : ` ${money(total)}`}計算，實際買賣請考慮手續費與稅。</p>`;
+}
+const adlg = $("adlg");
+function allocSum() {
+  const t = [...$("afields").querySelectorAll("input")].reduce((s, i) => s + (Number(i.value) || 0), 0);
+  $("asum").textContent = `合計 ${fmt.format(t)}%` + (t > 100 ? "（超過 100%）" : t < 100 ? `，其餘 ${fmt.format(100 - t)}% 未指定` : "");
+  $("asum").classList.toggle("neg", t > 100);
+}
+$("alloc-edit").onclick = () => {
+  const T = (data.prefs && data.prefs.alloc) || {};
+  const by = {};
+  data.assets.filter((a) => !a.liability).forEach((a) => (by[a.category] = (by[a.category] || 0) + toBase(a)));
+  const total = Object.values(by).reduce((s, v) => s + v, 0);
+  const cats = [...new Set([...Object.keys(by).filter((k) => by[k] > 0), ...Object.keys(T), ...CATS])];
+  $("afields").innerHTML = cats.map((c) => `<label class="bfield"><span>${esc(c)}${total > 0 && by[c] ? `<small class="muted">目前 ${((by[c] / total) * 100).toFixed(1)}%</small>` : ""}</span>
+      <input type="number" min="0" max="100" step="any" inputmode="decimal" data-cat="${esc(c)}" value="${T[c] ?? ""}" placeholder="不設"></label>`).join("");
+  $("aerr").textContent = "";
+  allocSum();
+  adlg.showModal();
+};
+$("afields").addEventListener("input", allocSum);
+$("aform").onsubmit = async (e) => {
+  e.preventDefault();
+  const alloc = {};
+  for (const i of $("afields").querySelectorAll("input")) {
+    if (i.value.trim() === "") continue;
+    const v = Number(i.value);
+    if (!(v >= 0 && v <= 100)) return ($("aerr").textContent = `「${i.dataset.cat}」要是 0 到 100 之間的數字`);
+    alloc[i.dataset.cat] = v;
+  }
+  try {
+    data = await invoke("set_prefs", { alloc });
+    adlg.close();
+    render();
+    toast("目標配置已儲存");
+  } catch (err) { $("aerr").textContent = String(err); }
+};
+
 $("range").onclick = (e) => {
   const b = e.target.closest("button");
   if (!b) return;
@@ -1314,6 +1381,28 @@ async function runPlans(announce) {
     if (r.added) toast(`定期定額已自動新增 ${r.added} 筆買入`);
   } catch (err) { if (announce) toast(String(err)); }
 }
+
+/* ---------- theme: auto (follows the system) / light / dark; a per-device choice ---------- */
+let themeMode = store.get("theme", "auto");
+const mqDark = matchMedia("(prefers-color-scheme: dark)");
+const isDark = () => themeMode === "dark" || (themeMode === "auto" && mqDark.matches);
+function applyTheme(redraw) {
+  const dark = isDark();
+  document.documentElement.classList.toggle("dark", dark);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#0a0e1d" : "#ffffff");
+  [...$("theme-seg").children].forEach((b) => b.classList.toggle("on", b.dataset.t === themeMode));
+  $("theme-hint").textContent = themeMode === "auto" ? `自動：跟著系統的深色／淺色設定（現在是${dark ? "深色" : "淺色"}）。` : themeMode === "dark" ? "深色：夜間或省電螢幕更舒服。" : "淺色：白色液態玻璃。";
+  if (redraw) render(); // charts read the colours when they draw
+}
+$("theme-seg").onclick = (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  themeMode = b.dataset.t;
+  store.set("theme", themeMode);
+  applyTheme(true);
+};
+mqDark.addEventListener?.("change", () => { if (themeMode === "auto") applyTheme(true); });
+applyTheme(false);
 
 /* ---------- performance mode ---------- */
 // off = full effects, on = lite, auto = lite on low battery or when the system asks for reduced motion.
@@ -2102,15 +2191,114 @@ function renderFlow() {
         <span class="${m}">${fmt0.format(v)} <span class="muted">${((v / out) * 100).toFixed(0)}%</span></span></div>`).join("")
     : '<p class="muted">這個月還沒有支出記錄。</p>';
 
-  const list = [...mf].sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
-  $("flow-count").textContent = `(${list.length})`;
+  renderBudgets(mf, m);
+  renderFlowTrend();
+
+  const q = (ui.fq || "").trim().toLowerCase();
+  const list = (q ? all.filter((f) => (f.note + " " + f.category).toLowerCase().includes(q)) : [...mf])
+    .sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
+  flowShown = list;
+  $("flow-count").textContent = q ? `(${list.length} 筆，所有月份)` : `(${list.length})`;
+  const sIn = tot(list, "in"), sOut = tot(list, "out");
+  $("flow-qsum").innerHTML = q && list.length ? `找到的合計：收入 <b class="pos ${m}">+${fmt0.format(sIn)}</b>、支出 <b class="neg ${m}">−${fmt0.format(sOut)}</b>` : "";
   $("flow-list").innerHTML = list.length
-    ? list.map((f) => `<div class="frow"><span class="muted">${esc(f.date.slice(5))}</span>
+    ? list.map((f) => `<div class="frow"><span class="muted">${esc(q ? f.date : f.date.slice(5))}</span>
         <span class="tag">${esc(f.category)}</span><span class="note-t">${esc(f.note)}</span>
         <span class="amt ${f.kind === "in" ? "pos" : "neg"} ${m}">${f.kind === "in" ? "+" : "−"}${fmt0.format(f.amount)}</span>
         <button class="link danger" data-delflow="${f.id}">刪除</button></div>`).join("")
-    : '<p class="muted">沒有記錄，按右上角「記一筆」開始記帳。</p>';
+    : q ? '<p class="muted">找不到符合的記錄。</p>' : '<p class="muted">沒有記錄，按右上角「記一筆」開始記帳。</p>';
 }
+let flowShown = [];
+
+// Monthly budgets per expense category (shared with the paired device). The pace marker shows how much of the month is gone.
+function spentBy(ym) {
+  const by = {};
+  (data.cashflow || []).filter((f) => f.kind === "out" && f.date.startsWith(ym)).forEach((f) => (by[f.category] = (by[f.category] || 0) + f.amount));
+  return by;
+}
+function renderBudgets(mf, m) {
+  const B = (data.prefs && data.prefs.budgets) || {}, keys = Object.keys(B);
+  const cur = ui.fm === todayStr().slice(0, 7);
+  const [y, mo] = ui.fm.split("-").map(Number), days = new Date(y, mo, 0).getDate();
+  const pace = cur ? new Date().getDate() / days : null;
+  $("budget-pace").textContent = cur ? `（本月已過 ${Math.round(pace * 100)}%）` : "";
+  if (!keys.length) {
+    $("budget-list").innerHTML = '<p class="muted">還沒有設定預算。設定每個支出類別每月最多花多少，快超過時會提醒你。</p>';
+    return;
+  }
+  const spent = spentBy(ui.fm);
+  const row = (name, used, limit, total) => {
+    const r = limit > 0 ? used / limit : 0, cls = r > 1 ? "over" : r >= 0.8 ? "warn" : "ok";
+    const left = limit - used;
+    return `<div class="brow ${cls}${total ? " total" : ""}"><span class="bname">${esc(name)}</span>
+      <span class="btrack"><i style="width:${Math.min(r, 1) * 100}%"></i>${pace !== null ? `<b class="bpace" style="left:${pace * 100}%" title="本月已過 ${Math.round(pace * 100)}%"></b>` : ""}</span>
+      <span class="bnum ${m}">${fmt0.format(used)} / ${fmt0.format(limit)}</span>
+      <span class="bleft ${m}">${left >= 0 ? `還剩 ${fmt0.format(left)}` : `超出 ${fmt0.format(-left)}`}</span></div>`;
+  };
+  const sumL = keys.reduce((s, k) => s + B[k], 0), sumU = keys.reduce((s, k) => s + (spent[k] || 0), 0);
+  $("budget-list").innerHTML = keys.sort((a, b) => (spent[b] || 0) / B[b] - (spent[a] || 0) / B[a]).map((k) => row(k, spent[k] || 0, B[k])).join("")
+    + (keys.length > 1 ? row("合計", sumU, sumL, true) : "");
+}
+
+// 12 months of income and expense side by side; click one to open it. The window stays on the last 12 months (so clicking a
+// bar does not move the chart) and only shifts when the month shown lies outside it.
+function renderFlowTrend() {
+  const all = data.cashflow || [], months = [], now = todayStr().slice(0, 7);
+  const end = ui.fm > now ? ui.fm : ui.fm < shiftMonth(now, -11) ? shiftMonth(ui.fm, 11) : now;
+  for (let i = 11; i >= 0; i--) months.push(shiftMonth(end, -i));
+  const v = months.map((ym) => {
+    const mf = all.filter((f) => f.date.startsWith(ym));
+    return { ym, inc: mf.filter((f) => f.kind === "in").reduce((s, f) => s + f.amount, 0), out: mf.filter((f) => f.kind === "out").reduce((s, f) => s + f.amount, 0) };
+  });
+  const max = Math.max(...v.map((x) => Math.max(x.inc, x.out)), 0);
+  if (!max) { $("flow-trend").innerHTML = '<p class="muted">還沒有記帳資料。</p>'; return; }
+  $("flow-trend").innerHTML = v.map((x) => `<button type="button" class="ft-col${x.ym === ui.fm ? " on" : ""}" data-ym="${x.ym}"
+      title="${x.ym}${ui.hidden ? "" : `：收入 ${fmt0.format(x.inc)}、支出 ${fmt0.format(x.out)}`}">
+      <span class="ft-bars"><i class="in" style="height:${(x.inc / max) * 100}%"></i><i class="out" style="height:${(x.out / max) * 100}%"></i></span>
+      <span class="ft-m">${Number(x.ym.slice(5))}${curSize === "compact" ? "" : "月"}</span></button>`).join("");
+}
+$("flow-trend").onclick = (e) => { const b = e.target.closest("[data-ym]"); if (b) { ui.fm = b.dataset.ym; renderFlow(); } };
+$("flow-q").addEventListener("input", () => { ui.fq = $("flow-q").value; renderFlow(); });
+$("flow-csv").onclick = () => {
+  const cell = (s) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+  const rows = flowShown.map((f) => [f.date, f.kind === "in" ? "收入" : "支出", f.category, String(f.amount), f.note].map(cell).join(","));
+  if (!rows.length) return toast("沒有可以匯出的記錄");
+  const name = ui.fq ? `moneypi-記帳-搜尋-${todayStr()}.csv` : `moneypi-記帳-${ui.fm}.csv`;
+  saveText(name, "\ufeff" + ["日期,類型,類別,金額（" + baseCur() + "）,備註", ...rows].join("\n") + "\n", "text/csv", "記帳 CSV");
+};
+
+// budget dialog: one field per expense category (the standard ones, any used ones, and any that already have a budget)
+const bdlg = $("bdlg");
+$("budget-edit").onclick = () => {
+  const B = (data.prefs && data.prefs.budgets) || {};
+  const cats = [...new Set([...FLOW_CATS.out, ...(data.cashflow || []).filter((f) => f.kind === "out").map((f) => f.category), ...Object.keys(B)])];
+  const avg = (c) => { // average monthly spending of the last 3 full months, as a hint
+    const ms = [1, 2, 3].map((i) => shiftMonth(todayStr().slice(0, 7), -i));
+    return ms.reduce((s, ym) => s + (spentBy(ym)[c] || 0), 0) / 3;
+  };
+  $("bfields").innerHTML = cats.map((c) => { const a = avg(c);
+    return `<label class="bfield"><span>${esc(c)}${a > 0 && !ui.hidden ? `<small class="muted">近 3 個月平均 ${fmt0.format(a)}</small>` : ""}</span>
+      <input type="number" min="0" step="any" inputmode="decimal" data-cat="${esc(c)}" value="${B[c] ?? ""}" placeholder="不設"></label>`; }).join("");
+  $("berr").textContent = "";
+  bdlg.showModal();
+};
+$("bform").onsubmit = async (e) => {
+  e.preventDefault();
+  const budgets = {};
+  for (const i of $("bfields").querySelectorAll("input")) {
+    if (i.value.trim() === "") continue;
+    const v = Number(i.value);
+    if (!(v >= 0)) return ($("berr").textContent = `「${i.dataset.cat}」的預算要是 0 或正數`);
+    budgets[i.dataset.cat] = v;
+  }
+  try {
+    data = await invoke("set_prefs", { budgets });
+    bdlg.close();
+    render();
+    toast("預算已儲存");
+  } catch (err) { $("berr").textContent = String(err); }
+};
+
 /* ---------- monthly report ---------- */
 const lastDayOf = (ym) => { const [y, m] = ym.split("-").map(Number); return `${ym}-${String(new Date(y, m, 0).getDate()).padStart(2, "0")}`; };
 
@@ -2203,7 +2391,57 @@ function renderReport() {
   $("rp-cats").innerHTML = cats.length ? cats.map(([c, v], i) => `<div class="bar-row"><span>${esc(c)}</span>
       <span class="bar-track"><span class="bar-fill" style="display:block;width:${(v / out) * 100}%;background:${COLORS[i % COLORS.length]}"></span></span>
       <span class="${m}">${fmt0.format(v)} <span class="muted">${((v / out) * 100).toFixed(0)}%</span></span></div>`).join("") : '<p class="muted">這個月沒有支出記錄。</p>';
+  renderFire();
 }
+/* ---------- financial independence (FIRE) estimate ---------- */
+// Needed = yearly spending / withdrawal rate (the "4% rule" with 4). Time = months until net worth, growing at the expected
+// return plus the monthly saving, reaches that. Empty fields fall back to the user's own ledger and current net worth.
+const FIRE_IN = ["exp", "save", "ret", "wr"];
+function fireDefaults() {
+  const all = data.cashflow || [], ms = new Map();
+  all.forEach((f) => { const k = f.date.slice(0, 7), e = ms.get(k) || { inc: 0, out: 0 }; e[f.kind === "in" ? "inc" : "out"] += f.amount; ms.set(k, e); });
+  // finished months are the fair average; someone who only started this month gets this month's numbers so far
+  const cur = todayStr().slice(0, 7), done = [...ms.entries()].filter(([k]) => k < cur).sort().slice(-6).map(([, v]) => v);
+  const recent = done.length ? done : ms.has(cur) ? [ms.get(cur)] : [];
+  const avg = (fn) => (recent.length ? recent.reduce((s, v) => s + fn(v), 0) / recent.length : null);
+  return { exp: avg((v) => v.out), save: avg((v) => v.inc - v.out), ret: 5, wr: 4, months: recent.length };
+}
+function renderFire() {
+  let saved = {};
+  try { saved = JSON.parse(store.get("fire", "{}")) || {}; } catch {}
+  const def = fireDefaults(), m = mask();
+  FIRE_IN.forEach((k) => {
+    const el = $("fire-" + k);
+    if (document.activeElement !== el) el.value = saved[k] ?? "";
+    el.placeholder = def[k] === null ? "例如 30000" : ui.hidden && (k === "exp" || k === "save") ? "••••" : fmt0.format(Math.round(def[k] * 100) / 100);
+  });
+  const val = (k) => { const v = $("fire-" + k).value.trim(); return v === "" ? def[k] : Number(v); };
+  const exp = val("exp"), save = val("save") ?? 0, ret = val("ret"), wr = val("wr");
+  const A = data.assets.filter((a) => !a.liability), net = sum(A) - sum(data.assets.filter((a) => a.liability));
+  if (!(exp > 0) || !(wr > 0)) {
+    $("fire-out").innerHTML = '<p class="muted">填入每月生活費（或先記幾個月的帳）就能試算。</p>';
+    return;
+  }
+  const target = (exp * 12) / (wr / 100), r = Math.pow(1 + (ret || 0) / 100, 1 / 12) - 1;
+  let n = 0, v = net;
+  while (v < target && n < 1200) { v = v * (1 + r) + save; n++; }
+  const when = net >= target ? "已經達成 🎉" : n >= 1200 ? "以目前的存錢速度，100 年內到不了" : `${Math.floor(n / 12) ? Math.floor(n / 12) + " 年 " : ""}${n % 12 ? (n % 12) + " 個月" : ""}`;
+  const date = net < target && n < 1200 ? (() => { const d = new Date(); d.setMonth(d.getMonth() + n); return `約 ${d.getFullYear()} 年 ${d.getMonth() + 1} 月`; })() : "";
+  const tile = (k, val, sub = "", cls = "") => `<div class="stat ${cls}"><span>${k}</span><b>${val}</b>${sub ? `<small>${sub}</small>` : ""}</div>`;
+  $("fire-out").innerHTML =
+    tile("財務自由需要", `<span class="${m}">${money(target)}</span>`, `每年生活費 ÷ ${fmt.format(wr)}%`) +
+    tile("目前進度", `${Math.max(0, Math.min(100, (net / target) * 100)).toFixed(1)}%`, `淨資產 <span class="${m}">${money(net)}</span>`) +
+    tile("預估還要", when, date, net >= target ? "up" : "") +
+    tile("現在每月可安全提領", `<span class="${m}">${money(Math.max(0, (net * wr) / 100 / 12))}</span>`, `淨資產 × ${fmt.format(wr)}% ÷ 12`);
+}
+FIRE_IN.forEach((k) => $("fire-" + k).addEventListener("input", () => {
+  const o = {};
+  FIRE_IN.forEach((j) => { const v = $("fire-" + j).value.trim(); if (v !== "") o[j] = Number(v); });
+  store.set("fire", JSON.stringify(o));
+  renderFire();
+}));
+$("fire-reset").onclick = () => { store.set("fire", "{}"); FIRE_IN.forEach((k) => ($("fire-" + k).value = "")); renderFire(); };
+
 $("rm-prev").onclick = () => { ui.rm = shiftMonth(ui.rm, -1); renderReport(); };
 $("rm-next").onclick = () => { if (ui.rm < todayStr().slice(0, 7)) { ui.rm = shiftMonth(ui.rm, 1); renderReport(); } };
 
@@ -2223,8 +2461,32 @@ let flowKind = "out";
 function setFlowKind(k) {
   flowKind = k;
   [...$("f-kind").children].forEach((b) => b.classList.toggle("on", b.dataset.k === k));
-  ffCat.setOptions(FLOW_CATS[k], FLOW_CATS[k][0]);
+  const used = (data.cashflow || []).filter((f) => f.kind === k).map((f) => f.category);
+  ffCat.setOptions([...new Set([...FLOW_CATS[k], ...used])], FLOW_CATS[k][0]);
+  renderSuggestions(k);
 }
+// "常用": what you enter most often (same category, note and amount) in the last 120 days, one tap to fill the form.
+let suggs = [];
+function renderSuggestions(k) {
+  const since = new Date(Date.now() - 120 * 864e5).toLocaleDateString("sv-SE"), n = new Map();
+  (data.cashflow || []).filter((f) => f.kind === k && f.date >= since).forEach((f) => {
+    const key = `${f.category}|${f.note}|${f.amount}`;
+    const e = n.get(key) || { category: f.category, note: f.note, amount: f.amount, count: 0, last: "" };
+    e.count++; if (f.date > e.last) e.last = f.date;
+    n.set(key, e);
+  });
+  suggs = [...n.values()].filter((e) => e.count >= 2).sort((a, b) => b.count - a.count || b.last.localeCompare(a.last)).slice(0, 6);
+  $("f-sugg").innerHTML = suggs.length ? '<span class="muted">常用：</span>' + suggs.map((e, i) =>
+    `<button type="button" class="chip" data-sg="${i}">${esc(e.note || e.category)}${ui.hidden ? "" : ` · ${fmt0.format(e.amount)}`}</button>`).join("") : "";
+}
+$("f-sugg").onclick = (e) => {
+  const b = e.target.closest("[data-sg]");
+  if (!b) return;
+  const g = suggs[Number(b.dataset.sg)];
+  ffCat.setValue(g.category);
+  fform.amount.value = g.amount;
+  fform.note.value = g.note;
+};
 $("f-kind").onclick = (e) => { const b = e.target.closest("button"); if (b) setFlowKind(b.dataset.k); };
 $("flow-add").onclick = () => {
   fform.reset();
@@ -2240,10 +2502,16 @@ fform.onsubmit = async (e) => {
     data = await invoke("add_flow", {
       flow: { id: 0, date: fform.date.value.trim(), kind: flowKind, category: ffCat.value, amount: num(fform.amount.value), note: fform.note.value.trim() },
     });
-    ui.fm = fform.date.value.trim().slice(0, 7);
+    const ym = fform.date.value.trim().slice(0, 7), cat = ffCat.value;
+    ui.fm = ym;
     fdlg.close();
     render();
-    toast("已記一筆");
+    // tell right away when this expense used up (most of) the category's budget
+    const limit = flowKind === "out" && data.prefs && data.prefs.budgets ? data.prefs.budgets[cat] : 0;
+    const used = limit ? spentBy(ym)[cat] || 0 : 0;
+    if (limit && used > limit) toast(`已記一筆。「${cat}」這個月已超出預算${ui.hidden ? "" : ` ${fmt0.format(used - limit)}`}`);
+    else if (limit && used >= limit * 0.8) toast(`已記一筆。「${cat}」這個月已用掉預算的 ${Math.round((used / limit) * 100)}%`);
+    else toast("已記一筆");
   } catch (err) {
     $("ferr").textContent = String(err);
   }

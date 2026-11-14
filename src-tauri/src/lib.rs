@@ -253,9 +253,25 @@ struct Data {
     /// A device setting: never synced and kept when a backup is restored.
     #[serde(default = "default_channel")]
     channel: String,
+    #[serde(default)]
+    prefs: Prefs,
     /// false only on a brand-new install, until the user has picked `base` (old data files count as picked: they are TWD).
     #[serde(default = "yes")]
     base_set: bool,
+}
+
+/// Settings that belong to the books rather than to one device, so paired devices share them: monthly budgets per expense
+/// category (in the base currency) and the target allocation per asset category (percent). When two devices sync, the side
+/// that changed them last wins as a whole.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+struct Prefs {
+    #[serde(default)]
+    budgets: BTreeMap<String, f64>,
+    #[serde(default)]
+    alloc: BTreeMap<String, f64>,
+    /// ms since epoch of the last change; 0 = never set
+    #[serde(default)]
+    at: u64,
 }
 
 /// The device this one syncs with: where to reach it and the PIN it expects.
@@ -345,6 +361,7 @@ impl Default for Data {
             install_id: String::new(),
             base: base_currency(),
             channel: default_channel(),
+            prefs: Prefs::default(),
             base_set: false,
         }
     }
@@ -530,6 +547,9 @@ struct SyncPayload {
     /// The sender is a brand-new install that has not picked its main currency yet (it adopts the other side's).
     #[serde(default)]
     fresh: bool,
+    /// Shared budgets / allocation targets; absent from older versions, which then leave ours alone.
+    #[serde(default)]
+    prefs: Option<Prefs>,
 }
 
 /// A brand-new install: no currency chosen yet and nothing entered.
@@ -548,6 +568,7 @@ fn sync_payload(d: &Data) -> SyncPayload {
         stamps: d.stamps.clone(),
         base: d.base.clone(),
         fresh: is_fresh(d),
+        prefs: Some(d.prefs.clone()),
     }
 }
 
@@ -640,6 +661,11 @@ fn merge_payload(d: &mut Data, remote: &SyncPayload, now: u64, base: u64) -> usi
     d.stamps = stamps;
     let changed = d.stamps.iter().filter(|(k, v)| before.get(*k) != Some(*v)).count();
     add_missing_snapshots(&mut d.snapshots, remote.snapshots.clone(), "9999-12-31");
+    let mut changed = changed;
+    if let Some(p) = remote.prefs.as_ref().filter(|p| p.at > d.prefs.at) {
+        d.prefs = p.clone();
+        changed += 1;
+    }
     for (c, r) in &remote.rates {
         d.rates.entry(c.clone()).or_insert(*r);
     }
@@ -1594,6 +1620,9 @@ impl Core {
         let mut d = self.data.lock().unwrap();
         // The backup only carries finance data; keep this machine's own sync settings.
         inc.channel = d.channel.clone();
+        if inc.prefs != d.prefs {
+            inc.prefs.at = now_ms(); // what was restored is the newest version, also for the paired device
+        }
         inc.sync_enabled = d.sync_enabled;
         inc.sync_port = d.sync_port;
         inc.sync_pin = d.sync_pin.clone();
@@ -2172,9 +2201,56 @@ impl Core {
         for fl in d.cashflow.iter_mut() {
             fl.amount /= f;
         }
+        for b in d.prefs.budgets.values_mut() {
+            *b /= f;
+        }
+        if !d.prefs.budgets.is_empty() {
+            d.prefs.at = now_ms();
+        }
         d.base = code;
         d.base_set = true;
         self.commit(&mut d)?;
+        Ok(view(&d))
+    }
+
+    /// Replace the monthly budgets and/or the target allocation (each only when given). Zero entries are dropped.
+    fn set_prefs(&self, budgets: Option<BTreeMap<String, f64>>, alloc: Option<BTreeMap<String, f64>>) -> Result<Value, String> {
+        fn clean(m: BTreeMap<String, f64>, what: &str, max: f64) -> Result<BTreeMap<String, f64>, String> {
+            if m.len() > 50 {
+                return Err(format!("{what}太多項了"));
+            }
+            let mut out = BTreeMap::new();
+            for (k, v) in m {
+                let k = k.trim().to_string();
+                if k.is_empty() || k.chars().count() > 20 {
+                    return Err(format!("{what}的類別名稱需為 1–20 個字"));
+                }
+                if !v.is_finite() || v < 0.0 || v > max {
+                    return Err(format!("「{k}」的{what}不正確"));
+                }
+                if v > 0.0 {
+                    out.insert(k, v);
+                }
+            }
+            Ok(out)
+        }
+        let budgets = budgets.map(|b| clean(b, "預算", 1e15)).transpose()?;
+        let alloc = alloc.map(|a| clean(a, "目標比例", 100.0)).transpose()?;
+        if let Some(a) = &alloc {
+            let total: f64 = a.values().sum();
+            if total > 100.0 + 1e-6 {
+                return Err(format!("目標比例加起來是 {total:.1}%，不能超過 100%"));
+            }
+        }
+        let mut d = self.data.lock().unwrap();
+        if let Some(b) = budgets {
+            d.prefs.budgets = b;
+        }
+        if let Some(a) = alloc {
+            d.prefs.alloc = a;
+        }
+        d.prefs.at = now_ms();
+        self.persist(&mut d)?;
         Ok(view(&d))
     }
 
@@ -3055,6 +3131,10 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
             let base = core.data.lock().unwrap().base.clone();
             rate_quote(&arg::<String>(&args, "code")?, &base)
         }
+        "set_prefs" => core.set_prefs(
+            serde_json::from_value(args["budgets"].clone()).map_err(|e| e.to_string())?,
+            serde_json::from_value(args["alloc"].clone()).map_err(|e| e.to_string())?,
+        ),
         "set_channel" if !remote => core.set_channel(&arg::<String>(&args, "channel")?),
         "set_base" if !remote => core.set_base(&arg::<String>(&args, "code")?),
         "import_tracker" => core.import_tracker(&arg::<String>(&args, "text")?),
@@ -4221,6 +4301,66 @@ mod tests {
         ] {
             assert!(external_url(bad).is_err(), "{bad}");
         }
+    }
+
+    // ------------------------------------------------------------- shared budgets / allocation targets
+
+    #[test]
+    fn budgets_and_allocation_targets_are_checked_and_zeroes_dropped() {
+        let c = Arc::new(temp_core("prefs"));
+        let v = dispatch(&c, "set_prefs", json!({ "budgets": { " 餐飲 ": 8000.0, "娛樂": 0.0 } }), false).unwrap();
+        assert_eq!(v["prefs"]["budgets"], json!({ "餐飲": 8000.0 }), "trimmed, and a 0 budget means none");
+        assert_eq!(v["prefs"]["alloc"], json!({}), "alloc untouched when not given");
+        dispatch(&c, "set_prefs", json!({ "alloc": { "股票": 60.0, "現金": 40.0 } }), false).unwrap();
+        assert_eq!(c.data.lock().unwrap().prefs.budgets.len(), 1, "budgets untouched when not given");
+        for bad in [
+            json!({ "alloc": { "股票": 70.0, "現金": 40.0 } }),
+            json!({ "alloc": { "股票": -1.0 } }),
+            json!({ "alloc": { "股票": 101.0 } }),
+            json!({ "budgets": { "": 10.0 } }),
+            json!({ "budgets": { "一二三四五六七八九十一二三四五六七八九十一": 10.0 } }),
+            json!({ "budgets": { "餐飲": -5.0 } }),
+        ] {
+            assert!(dispatch(&c, "set_prefs", bad.clone(), false).is_err(), "{bad}");
+        }
+        assert_eq!(c.data.lock().unwrap().prefs.alloc["股票"], 60.0, "a refused change leaves the old values");
+        let old: Data = serde_json::from_str(r#"{"next_id":0,"assets":[],"snapshots":[]}"#).unwrap();
+        assert_eq!(old.prefs, Prefs::default(), "old data files simply have none");
+    }
+
+    #[test]
+    fn shared_prefs_sync_newest_wins_and_an_older_peer_leaves_them_alone() {
+        let (pc, phone) = pair();
+        dispatch(&pc, "set_prefs", json!({ "budgets": { "餐飲": 8000.0 } }), false).unwrap();
+        exchange(&pc, &phone);
+        assert_eq!(phone.data.lock().unwrap().prefs.budgets["餐飲"], 8000.0);
+        pause();
+        dispatch(&phone, "set_prefs", json!({ "budgets": { "餐飲": 6000.0 }, "alloc": { "股票": 50.0 } }), false).unwrap();
+        exchange(&pc, &phone);
+        assert_eq!(pc.data.lock().unwrap().prefs, phone.data.lock().unwrap().prefs, "the newer change reached the PC");
+        assert_eq!(pc.data.lock().unwrap().prefs.budgets["餐飲"], 6000.0);
+        // an older version sends no prefs at all: ours stay
+        let mut old = sync_payload(&phone.data.lock().unwrap());
+        old.prefs = None;
+        pc.sync(old).unwrap();
+        assert_eq!(pc.data.lock().unwrap().prefs.alloc["股票"], 50.0);
+        // the same JSON an older version would send (no "prefs" key) still parses
+        let mut v = serde_json::to_value(sync_payload(&phone.data.lock().unwrap())).unwrap();
+        v.as_object_mut().unwrap().remove("prefs");
+        assert!(serde_json::from_value::<SyncPayload>(v).unwrap().prefs.is_none());
+    }
+
+    #[test]
+    fn changing_the_main_currency_converts_budgets_too() {
+        let c = Arc::new(temp_core("prefsbase"));
+        dispatch(&c, "set_base", json!({ "code": "TWD" }), false).unwrap();
+        save(&c, cash("存款", 100.0));
+        dispatch(&c, "set_prefs", json!({ "budgets": { "餐飲": 3200.0 }, "alloc": { "現金": 30.0 } }), false).unwrap();
+        let usd = c.data.lock().unwrap().rates["USD"];
+        dispatch(&c, "set_base", json!({ "code": "USD" }), false).unwrap();
+        let d = c.data.lock().unwrap();
+        assert!((d.prefs.budgets["餐飲"] - 3200.0 / usd).abs() < 1e-9);
+        assert_eq!(d.prefs.alloc["現金"], 30.0, "percentages do not change");
     }
 
     #[test]

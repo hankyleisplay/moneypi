@@ -122,7 +122,7 @@ canvas{width:100%;height:230px;display:block}
 .blur{filter:blur(7px);user-select:none}
 
 /* ---------- form controls (custom) ---------- */
-input[type=text],input[type=number],input[type=password],input:not([type]){font:inherit;color:var(--fg);padding:8px 13px;border-radius:14px;background:var(--field);
+input[type=text],input[type=number],input[type=password],input[type=search],input:not([type]){font:inherit;color:var(--fg);padding:8px 13px;border-radius:14px;background:var(--field);
   border:1px solid var(--line);box-shadow:inset 0 1px 3px rgba(40,55,120,.08);width:100%;outline:none;transition:border-color .15s,box-shadow .15s}
 input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,107,255,.18)}
 input::placeholder{color:#9aa3bd}
@@ -560,3 +560,113 @@ button,.nav,.item,.dd-btn,.seg,summary{-webkit-user-select:none;user-select:none
   button:hover,.nav:hover,.item:hover,.seg button:hover,.dd-btn:hover,.qm:hover{transform:none}
   button.rm-btn:hover{background:rgba(224,52,74,.06)}
 }
+
+/* ---------- dark theme (html.dark, set by main.js from Settings → 外觀: 自動 follows the system) ----------
+   Deep navy glass with a soft neon glow: same layout, only colours change. Rules carry html.dark so they win over the light ones. */
+html.dark{color-scheme:dark;
+  --fg:#e7eaf6;--muted:#9aa4c7;--accent:#7aa2ff;--accent2:#a98bff;--neg:#ff6b81;--pos:#3ddc97;
+  --glass:rgba(28,34,60,.62);--glass-hi:rgba(58,68,110,.7);
+  --rim:rgba(255,255,255,.07);--line:rgba(150,165,230,.17);--field:rgba(14,19,38,.72);
+  --shadow:0 10px 32px rgba(0,0,0,.5),0 2px 6px rgba(0,0,0,.35)}
+html.dark body,html.dark .orbs{background:#0a0e1d}
+html.dark .orbs i{opacity:.32}
+html.dark .orbs i:nth-child(1){background:radial-gradient(circle,#3b6dff 0%,rgba(59,109,255,0) 68%)}
+html.dark .orbs i:nth-child(2){background:radial-gradient(circle,#9b4dff 0%,rgba(155,77,255,0) 68%)}
+html.dark .orbs i:nth-child(3){background:radial-gradient(circle,#13c8a8 0%,rgba(19,200,168,0) 68%)}
+html.dark .glass{box-shadow:var(--shadow),inset 0 1px 0 var(--rim),inset 0 0 22px rgba(120,140,255,.05)}
+html.dark button{background:linear-gradient(180deg,rgba(62,72,112,.85),rgba(36,43,74,.85));box-shadow:0 2px 8px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.08)}
+html.dark button:hover{box-shadow:0 6px 16px rgba(0,0,0,.45),0 0 14px rgba(110,140,255,.18),inset 0 1px 0 rgba(255,255,255,.1)}
+html.dark button.primary{background:linear-gradient(160deg,#5b8cff,#7a5cff);box-shadow:0 6px 18px rgba(100,110,255,.45),0 0 18px rgba(122,92,255,.25),inset 0 1px 0 rgba(255,255,255,.3)}
+html.dark button.danger{background:linear-gradient(160deg,#ff6b81,#d02a46)}
+html.dark button.link,html.dark .seg button{background:none;box-shadow:none}
+html.dark .nav:hover,html.dark .item:hover,html.dark .prow:hover{background:rgba(70,82,130,.4)}
+html.dark .nav.on,html.dark .item.on{background:var(--glass-hi);box-shadow:0 4px 14px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.08),0 0 0 1px rgba(122,162,255,.18)}
+html.dark .card::after{background:linear-gradient(155deg,rgba(255,255,255,.07),transparent 42%)}
+html.dark .card.hero{background:linear-gradient(135deg,rgba(91,140,255,.28),rgba(122,92,255,.14))}
+html.dark .stat,html.dark .tag,html.dark .kindtag,html.dark .gcard,html.dark .gicon,html.dark .checks,html.dark .conn,html.dark .tips,
+html.dark .help,html.dark .guide,html.dark .invest-card{background:rgba(22,28,52,.66);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+html.dark .gcard.done{background:linear-gradient(135deg,rgba(61,220,151,.18),rgba(22,28,52,.66))}
+html.dark .seg{background:rgba(10,14,30,.55)}
+html.dark .seg button.on{background:linear-gradient(180deg,rgba(90,104,160,.9),rgba(62,72,118,.9));box-shadow:0 2px 8px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.12)}
+html.dark .dd-menu,html.dark dialog{background:rgba(22,27,50,.94);box-shadow:0 14px 40px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06)}
+html.dark .dd-menu li.act{background:rgba(122,162,255,.16)}
+html.dark dialog::backdrop{background:rgba(4,6,16,.55)}
+html.dark .tour-card,html.dark #tip{background:rgba(24,30,56,.98);box-shadow:0 18px 50px rgba(0,0,0,.6)}
+html.dark .tour-hole{box-shadow:0 0 0 9999px rgba(2,4,12,.66),0 0 0 2px rgba(122,162,255,.7) inset}
+html.dark .bar.glass{background:rgba(18,23,44,.97)!important;box-shadow:0 8px 18px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.05)!important}
+html.dark.lite .glass,html.dark.lite dialog,html.dark.lite .dd-menu{background:rgba(22,27,50,.97)!important;box-shadow:0 3px 12px rgba(0,0,0,.4)!important}
+html.dark #splash{background:radial-gradient(60vmax 60vmax at 20% 10%,rgba(59,109,255,.35),transparent 60%),radial-gradient(50vmax 50vmax at 85% 80%,rgba(155,77,255,.3),transparent 60%),#0a0e1d}
+html.dark .invest-panel{background:linear-gradient(120deg,rgba(40,52,100,.7),rgba(24,30,56,.8))}
+html.dark .invest-card .official-link{background:rgba(122,162,255,.1);border-color:rgba(122,162,255,.35)}
+html.dark .invest-card .official-link:hover,html.dark .invest-card .official-link:active{background:rgba(122,162,255,.2)}
+html.dark .holding-value-note,html.dark .url{background:rgba(122,162,255,.1)}
+html.dark .rate-add{background:rgba(10,14,30,.35)}
+html.dark .progress,html.dark .bar-track,html.dark .pgbar,html.dark .mbar,html.dark .sp-bar{background:rgba(150,165,230,.14)}
+html.dark #phone-btn.live::after{border-color:#0a0e1d}
+html.dark .qr{background:#fff} /* a QR code must stay dark-on-white to scan */
+html.dark .rm-btn{background:rgba(255,107,129,.08);border-color:rgba(255,107,129,.4)}
+html.dark ::placeholder{color:rgba(154,164,199,.6)}
+
+/* ---------- ledger: budgets, 12-month trend, search, quick-entry chips ---------- */
+.brow{display:grid;grid-template-columns:minmax(56px,auto) minmax(0,1fr) auto;grid-template-areas:"n t num" "n t left";column-gap:12px;align-items:center;padding:7px 0}
+.brow+.brow{border-top:1px solid var(--line)}
+.brow .bname{grid-area:n;font-weight:600}
+.brow .btrack{grid-area:t;position:relative;height:10px;border-radius:99px;background:rgba(90,105,160,.12);box-shadow:inset 0 1px 2px rgba(40,55,120,.12)}
+.brow .btrack i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#6fe0ae,#3ecf8e);transition:width .6s cubic-bezier(.2,.8,.2,1)}
+.brow.warn .btrack i{background:linear-gradient(90deg,#ffd27a,#f5a524)}
+.brow.over .btrack i{background:linear-gradient(90deg,#ff9aa8,#e0344a)}
+.brow .bpace{position:absolute;top:-4px;bottom:-4px;width:2px;margin-left:-1px;border-radius:2px;background:var(--fg);opacity:.45}
+.brow .bnum{grid-area:num;text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
+.brow .bleft{grid-area:left;text-align:right;font-size:12px;color:var(--muted)}
+.brow.over .bleft{color:var(--neg);font-weight:600}
+.brow.warn .bleft{color:#c27a00}
+.brow.total .bname{color:var(--muted)}
+.ftrend{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:4px;align-items:end;height:150px;margin-top:8px}
+#flow-trend .ft-col{all:unset;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:4px;height:100%;min-width:0;border-radius:10px;padding:4px 0;
+  background:none;border:0;box-shadow:none;transform:none}
+#flow-trend .ft-col:hover,#flow-trend .ft-col.on{background:rgba(47,107,255,.08)}
+#flow-trend .ft-col.on .ft-m{color:var(--accent);font-weight:700}
+#flow-trend .ft-col:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.ft-bars{flex:1;display:flex;align-items:flex-end;justify-content:center;gap:2px;width:100%}
+.ft-bars i{display:block;width:min(10px,38%);border-radius:4px 4px 1px 1px}
+.ft-bars i.in,.ft-legend i.in{background:linear-gradient(180deg,#6fe0ae,#3ecf8e)}
+.ft-bars i.out,.ft-legend i.out{background:linear-gradient(180deg,#ff9aa8,#fb7185)}
+.ft-m{font-size:11px;color:var(--muted);white-space:nowrap}
+html[data-size=compact] .ft-m{font-size:10px}
+.ft-legend{font-size:12px;color:var(--muted);display:inline-flex;align-items:center;gap:6px}
+.ft-legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-left:6px}
+#flow-q{margin:8px 0 4px}
+#flow-qsum{font-size:13px;margin-bottom:4px}
+.chips{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:10px}
+.chips:empty{display:none}
+.chips .muted{font-size:12px}
+.chip{padding:4px 12px;font-size:13px;min-height:0}
+.bfields{display:grid;gap:8px;margin-top:6px}
+.bfield{display:grid;grid-template-columns:minmax(0,1fr) 140px;align-items:center;gap:10px;margin:0}
+.bfield span{display:flex;flex-direction:column}
+.bfield small{font-size:11px}
+html.dark .brow .btrack{background:rgba(150,165,230,.14)}
+html.dark #flow-trend .ft-col{background:none;box-shadow:none}
+html.dark #flow-trend .ft-col:hover,html.dark #flow-trend .ft-col.on{background:rgba(122,162,255,.14)}
+html.dark .brow.warn .bleft{color:#ffc35a}
+
+/* ---------- target allocation / rebalancing ---------- */
+.rrow{display:grid;grid-template-columns:minmax(80px,auto) minmax(0,1fr) auto;grid-template-areas:"n t p" "n t a";column-gap:12px;align-items:center;padding:8px 0}
+.rrow+.rrow{border-top:1px solid var(--line)}
+.rname{grid-area:n;display:flex;align-items:center;gap:8px;font-weight:600}
+.rname i{flex:none;width:10px;height:10px;border-radius:3px}
+.rtrack{grid-area:t;position:relative;height:10px;border-radius:99px;background:rgba(90,105,160,.12)}
+.rtrack i{display:block;height:100%;border-radius:inherit;opacity:.85}
+.rtarget{position:absolute;top:-5px;bottom:-5px;width:3px;margin-left:-1.5px;border-radius:2px;background:var(--fg)}
+.rpct{grid-area:p;text-align:right;font-variant-numeric:tabular-nums;font-size:13px}
+.ract{grid-area:a;text-align:right;font-size:12px}
+html.dark .rtrack{background:rgba(150,165,230,.14)}
+/* ---------- FIRE estimate ---------- */
+.fire-in{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:10px 0}
+.fire-in label{margin:0}
+#fire-out{margin-top:4px}
+#fire-out .stat b{font-size:17px}
+html[data-size=compact] .rrow,html[data-size=compact] .brow{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"n p" "t t" "a a"}
+html[data-size=compact] .brow{grid-template-areas:"n num" "t t" "left left"}
+html[data-size=compact] .rrow .ract,html[data-size=compact] .brow .bleft{text-align:left}
+html[data-size=compact] .rtrack,html[data-size=compact] .brow .btrack{margin:6px 0 4px}
