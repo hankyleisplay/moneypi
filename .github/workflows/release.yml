@@ -80,15 +80,19 @@ jobs:
         id: draft
         run: |
           set -euo pipefail
-          state=$(gh release view "v$VERSION" --json isDraft -q .isDraft 2>/dev/null || echo none)
-          if [ "$state" = "false" ]; then echo "::error::v$VERSION is already published"; exit 1; fi
-          if [ "$state" = "none" ]; then
-            flags=(--draft --target "$GITHUB_SHA" --title "MoneyPi v$VERSION" --notes "建置中…")
-            [ "$PRE" = "true" ] && flags+=(--prerelease)
-            gh release create "v$VERSION" "${flags[@]}"
+          # "<id> <draft>" of the release for this tag, or nothing. Drafts have no tag yet, so only the list shows them.
+          lookup() { gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"v$VERSION\") | \"\(.id) \(.draft)\"" | head -1; }
+          found=$(lookup)
+          if [ -z "$found" ]; then
+            # The list can lag a few seconds behind a new release, so take the id from the create call itself.
+            id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="v$VERSION" -f target_commitish="$GITHUB_SHA" -f name="MoneyPi v$VERSION" -f body="建置中…" \
+              -F draft=true -F prerelease="$PRE" --jq .id)
+          else
+            id=${found% *}
+            [ "${found#* }" = "true" ] || { echo "::error::v$VERSION is already published"; exit 1; }
           fi
-          id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" --jq ".[] | select(.tag_name == \"v$VERSION\") | .id" | head -1)
-          [ -n "$id" ] || { echo "::error::could not find the draft release v$VERSION"; exit 1; }
+          [[ "$id" =~ ^[0-9]+$ ]] || { echo "::error::could not create or find the draft release v$VERSION (got '$id')"; exit 1; }
           echo "id=$id" >> "$GITHUB_OUTPUT"
           echo "draft release v$VERSION: id $id"
 
