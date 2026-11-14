@@ -403,7 +403,7 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
       <ul class="plain">
         <li>手機與電腦要在<b>同一個 Wi-Fi</b>（不是訪客網路，也不是行動數據）。</li>
         <li>電腦的 MoneyPi 要開著，並且已「啟用手機連線」。</li>
-        <li>Windows 防火牆第一次會詢問，請按「允許」；部分路由器的「AP 隔離」會擋住裝置互連，需要關閉。</li>
+        <li>電腦的防火牆第一次會詢問（Windows 會跳出防火牆視窗，Mac 會問「是否允許接受連入連線」），請按「允許」；部分路由器的「AP 隔離」會擋住裝置互連，需要關閉。</li>
         <li>PIN 不對或電腦換了 PIN：到電腦的「手機連線」看最新的 PIN，再回手機「連線」頁重新綁定。</li>
         <li>電腦的 IP 變了不用重綁，手機會自動在 Wi-Fi 裡把它找回來（最多每 2 分鐘找一次）。</li>
         <li>電腦設了密碼而鎖定時，要先在電腦解鎖。</li>
@@ -664,7 +664,7 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
       <ol>
         <li>手機與電腦要連<b>同一個 Wi-Fi</b>（不是訪客網路，也不是行動數據）。</li>
         <li>電腦上的 MoneyPi 要保持開啟。</li>
-        <li>第一次啟用時 Windows 防火牆會詢問，請按「允許」。若曾按過取消，到「Windows 安全性 → 防火牆 → 允許應用程式通過防火牆」勾選 MoneyPi。</li>
+        <li>第一次啟用時電腦的防火牆會詢問（Windows、Mac 都會），請按「允許」。若曾按過取消，到「Windows 安全性 → 防火牆 → 允許應用程式通過防火牆」勾選 MoneyPi。</li>
         <li>部分路由器開啟「AP 隔離」會擋住裝置互連，請在路由器關閉。</li>
         <li>有多個網路位址時，請試試上面列出的每一個。</li>
         <li>iPhone：用 Safari 開啟後，按分享 → 加入主畫面，就像 App 一樣使用。Android：Chrome 選單 → 加到主畫面。</li>

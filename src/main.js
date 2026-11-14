@@ -19,6 +19,9 @@ const store = {
 const inTauri = !!(window.__TAURI__ && window.__TAURI__.core);
 const isAndroid = inTauri && /Android/i.test(navigator.userAgent); // the phone app: same UI, own data, syncs with the computer
 document.documentElement.classList.toggle("android", isAndroid);
+// desktop flavour (only matters for a few hints): Windows, macOS or Linux
+const isMac = inTauri && !isAndroid && /Macintosh|Mac OS X/.test(navigator.userAgent);
+const isLinux = inTauri && !isAndroid && !isMac && /Linux/.test(navigator.userAgent);
 let token = store.get("token", "");
 if (!inTauri && location.hash.startsWith("#pin=")) {
   token = decodeURIComponent(location.hash.slice(5));
@@ -2805,11 +2808,13 @@ async function renderInstallFail(err) {
       <b>可以這樣處理</b>
       <div class="btnrow"><button type="button" class="primary" id="rm-retry">重試</button>
         ${s.winget ? '<button type="button" id="rm-winget">改用 winget 安裝</button>' : ""}</div>
-      ${s.winget ? "" : '<p class="hint">這台電腦沒有 winget（Windows 內建的安裝工具），所以請自行下載：</p>'}
+      ${s.winget || isMac || isLinux ? "" : '<p class="hint">這台電腦沒有 winget（Windows 內建的安裝工具），所以請自行下載：</p>'}
+      ${isMac ? '<p class="hint">有 Homebrew 的話，最快是在「終端機」輸入 <code>brew install cloudflared</code>，裝好後按「重新偵測」。</p>' : ""}
+      ${isLinux ? '<p class="hint">也可以用套件管理員安裝（例如 Cloudflare 官方的 apt／dnf 套件庫），裝好後按「重新偵測」。</p>' : ""}
       <p class="hint">自己安裝只要 3 步：</p>
       <ol class="steps">
-        <li>按「開啟下載頁」，下載 <code>cloudflared-windows-amd64.exe</code></li>
-        <li>把它改名為 <code>cloudflared.exe</code>，放到這個資料夾（沒有就自己建立）：<div class="url">${esc(s.bin_dir || "")}</div></li>
+        <li>按「開啟下載頁」，下載 <code>${esc(s.asset || "cloudflared")}</code>${isMac ? "，並解壓縮" : ""}</li>
+        <li>把${isMac ? "裡面的程式" : "它"}改名為 <code>${esc(s.exe || "cloudflared")}</code>，放到這個資料夾（沒有就自己建立）：<div class="url">${esc(s.bin_dir || "")}</div>${isMac || isLinux ? `<div class="hint">再在「終端機」輸入 <code>chmod +x</code> 加上這個檔案的位置，讓它可以執行。</div>` : ""}</li>
         <li>回到這裡按「重新偵測」</li>
       </ol>
       <div class="btnrow"><button type="button" id="rm-open">開啟下載頁</button><button type="button" id="rm-detect">重新偵測</button></div>
@@ -2830,7 +2835,7 @@ $("rm-body").onclick = async (e) => {
     else if (id === "rm-open") await invoke("open_external", { target: "releases" });
     else if (id === "rm-detect") {
       const s = await invoke("tunnel_status");
-      if (s.installed) { renderTunnel(s); toast("已偵測到 cloudflared"); } else $("pherr").textContent = "還沒找到 cloudflared，請確認檔名是 cloudflared.exe 且放在上面的資料夾";
+      if (s.installed) { renderTunnel(s); toast("已偵測到 cloudflared"); } else $("pherr").textContent = `還沒找到 cloudflared，請確認檔名是 ${isMac || isLinux ? "cloudflared" : "cloudflared.exe"} 且放在上面的資料夾`;
     }
     else if (id === "rm-start") {
       renderTunnel({}, "正在建立遠端連線（約數秒）…");

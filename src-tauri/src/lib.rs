@@ -1295,7 +1295,51 @@ fn extract_tunnel_url(line: &str) -> Option<String> {
     (host.ends_with(".trycloudflare.com") && !host.starts_with("api.")).then_some(url)
 }
 
-const CLOUDFLARED_ASSET: &str = "cloudflared-windows-amd64.exe";
+/// The computer's own name, shown on the paired device: Windows COMPUTERNAME, the Mac's "Computer Name", Linux hostname.
+fn computer_name() -> Option<String> {
+    let clean = |s: String| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(n) = std::env::var("COMPUTERNAME").ok().and_then(clean) {
+        return Some(n);
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(n) = Command::new("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| clean(String::from_utf8_lossy(&o.stdout).into())) {
+            return Some(n);
+        }
+    }
+    std::env::var("HOSTNAME").ok().and_then(clean).or_else(|| fs::read_to_string("/etc/hostname").ok().and_then(clean))
+}
+
+/// cloudflared's file name on this computer.
+const CF_EXE: &str = if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" };
+
+/// The official cloudflared download for this computer: the release asset name, and whether it is a .tgz (macOS)
+/// that holds the program instead of being the program itself.
+fn cloudflared_asset() -> Option<(&'static str, bool)> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", _) => Some(("cloudflared-windows-amd64.exe", false)),
+        ("linux", "x86_64") => Some(("cloudflared-linux-amd64", false)),
+        ("linux", "aarch64") => Some(("cloudflared-linux-arm64", false)),
+        ("macos", "x86_64") => Some(("cloudflared-darwin-amd64.tgz", true)),
+        ("macos", "aarch64") => Some(("cloudflared-darwin-arm64.tgz", true)),
+        _ => None,
+    }
+}
+
+/// A file called `name` anywhere under `dir` (the macOS archive's layout is not documented, so it is searched).
+fn find_file_named(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_file() && p.file_name().is_some_and(|n| n == name) {
+            return Some(p);
+        }
+        if p.is_dir() && depth > 0 {
+            if let Some(f) = find_file_named(&p, name, depth - 1) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
 const CLOUDFLARED_RELEASES: &str = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest";
 
 /// Download the official cloudflared build and install it only if it matches the SHA-256
@@ -1310,10 +1354,11 @@ fn download_cloudflared(dest: &Path, report: &dyn Fn(&str, u64, u64)) -> Result<
         .map_err(|e| format!("無法取得版本資訊：{e}"))?
         .into_json()
         .map_err(|e| format!("版本資訊格式錯誤：{e}"))?;
+    let (asset_name, packed) = cloudflared_asset().ok_or("這種電腦沒有官方的 cloudflared 版本")?;
     let asset = rel["assets"]
         .as_array()
-        .and_then(|a| a.iter().find(|x| x["name"] == CLOUDFLARED_ASSET))
-        .ok_or("找不到 Windows 版安裝檔")?;
+        .and_then(|a| a.iter().find(|x| x["name"] == asset_name))
+        .ok_or_else(|| format!("找不到官方的 {asset_name}"))?;
     let url = asset["browser_download_url"].as_str().ok_or("找不到下載網址")?;
     if !url.starts_with("https://github.com/cloudflare/cloudflared/releases/download/") {
         return Err("下載網址不在預期的官方來源，已中止".into());
@@ -1335,7 +1380,7 @@ fn download_cloudflared(dest: &Path, report: &dyn Fn(&str, u64, u64)) -> Result<
         .or_else(|| asset["size"].as_u64())
         .unwrap_or(0);
     let mut reader = resp.into_reader();
-    let part = dest.with_extension("exe.part");
+    let part = dest.with_extension("part");
     let result = (|| -> Result<String, String> {
         let mut f = fs::File::create(&part).map_err(|e| e.to_string())?;
         let (mut hasher, mut buf) = (Sha256::new(), vec![0u8; 64 * 1024]);
@@ -1371,7 +1416,29 @@ fn download_cloudflared(dest: &Path, report: &dyn Fn(&str, u64, u64)) -> Result<
         return Err("下載檔案的校驗碼不符，已中止（檔案可能損毀或被竄改）".into());
     }
     report("安裝中…", 1, 1);
-    fs::rename(&part, dest).map_err(|e| e.to_string())
+    if packed {
+        // macOS: the verified .tgz holds the program; unpack it with the system's tar and take the file out
+        let tmp = dest.with_extension("unpack");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+        let ok = Command::new("tar").arg("-xzf").arg(&part).arg("-C").arg(&tmp).status().map(|s| s.success()).unwrap_or(false);
+        let _ = fs::remove_file(&part);
+        let found = if ok { find_file_named(&tmp, "cloudflared", 3) } else { None };
+        let res = match found {
+            Some(f) => fs::rename(&f, dest).map_err(|e| e.to_string()),
+            None => Err("解壓縮後找不到 cloudflared".into()),
+        };
+        let _ = fs::remove_dir_all(&tmp);
+        res?;
+    } else {
+        fs::rename(&part, dest).map_err(|e| e.to_string())?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dest, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// winget (App Installer) ships with current Windows 10/11 but not every machine has it.
@@ -1744,15 +1811,14 @@ impl Core {
                 "count": files.len(), "files": files.into_iter().take(5).collect::<Vec<_>>() })
     }
 
-    fn open_backups(&self) -> Result<(), String> {
+    /// The backup folder, created if needed (the window opens it with the system file manager).
+    fn backup_dir_ready(&self) -> Result<PathBuf, String> {
         let dir = {
             let d = self.data.lock().unwrap();
             self.backup_path(&d)
         };
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let mut c = Command::new("explorer");
-        c.arg(&dir);
-        c.spawn().map(|_| ()).map_err(|e| e.to_string())
+        Ok(dir)
     }
 
     fn save_goal(&self, mut g: Goal) -> Result<Value, String> {
@@ -2593,7 +2659,7 @@ impl Core {
         if cfg!(target_os = "android") {
             "手機".into()
         } else {
-            std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "電腦".into())
+            computer_name().unwrap_or_else(|| "電腦".into())
         }
     }
 
@@ -2893,10 +2959,14 @@ impl Core {
         let mut c: Vec<PathBuf> = vec![];
         // our own verified copy first
         if let Some(dir) = self.path.parent() {
-            c.push(dir.join("bin").join("cloudflared.exe"));
+            c.push(dir.join("bin").join(CF_EXE));
         }
         if let Some(p) = std::env::var_os("PATH") {
-            c.extend(std::env::split_paths(&p).map(|d| d.join("cloudflared.exe")));
+            c.extend(std::env::split_paths(&p).map(|d| d.join(CF_EXE)));
+        }
+        // apps started from the Dock / a launcher do not get the shell's PATH: Homebrew and the usual places
+        if !cfg!(windows) {
+            c.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].iter().map(|d| PathBuf::from(d).join(CF_EXE)));
         }
         for var in ["ProgramFiles(x86)", "ProgramFiles"] {
             if let Some(b) = std::env::var_os(var) {
@@ -2922,7 +2992,8 @@ impl Core {
         let qr = link.as_deref().and_then(qr_svg);
         // `link` embeds the secret: it is only ever returned to the desktop window, never over HTTP
         json!({ "installed": installed.is_some(), "running": running, "url": url, "link": link, "qr": qr,
-            "winget": winget_available(), "bin_dir": self.bin_dir().map(|p| p.display().to_string()).unwrap_or_default() })
+            "winget": winget_available(), "bin_dir": self.bin_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+            "asset": cloudflared_asset().map(|a| a.0).unwrap_or(""), "exe": CF_EXE })
     }
 
     fn set_progress(&self, active: bool, stage: &str, done: u64, total: u64) {
@@ -2954,7 +3025,7 @@ impl Core {
             "winget" => self.install_with_winget(),
             _ => self.bin_dir().and_then(|dir| {
                 fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                download_cloudflared(&dir.join("cloudflared.exe"), &|st, d, t| self.set_progress(true, st, d, t))
+                download_cloudflared(&dir.join(CF_EXE), &|st, d, t| self.set_progress(true, st, d, t))
             }),
         };
         self.set_progress(false, "", 0, 0);
@@ -3476,7 +3547,8 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "tunnel_progress" if !remote => Ok(core.tunnel_progress()),
         "open_external" if !remote => {
             let t = arg::<String>(&args, "target")?;
-            if t == "backups" { core.open_backups().map(|_| Value::Null) } else { Err("請在應用程式視窗中開啟連結".into()) } // links go through `call` and the opener plugin
+            let _ = t;
+            Err("請在應用程式視窗中開啟".into()) // links and the backup folder open through `call` and the opener plugin
         }
         "save_plan" => core.save_plan(arg(&args, "plan")?),
         "delete_plan" => core.delete_plan(arg(&args, "id")?),
@@ -3494,8 +3566,14 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
 #[tauri::command]
 async fn call(app: AppHandle, state: State<'_, Arc<Core>>, cmd: String, args: Value) -> Result<Value, String> {
     // Links open through the opener plugin (system browser, also on Android), after the same whitelist check as before.
+    if cmd == "open_external" && args["target"] == "backups" {
+        // Explorer, Finder or the Linux file manager, whichever this computer has
+        let dir = state.inner().backup_dir_ready()?;
+        app.opener().open_path(dir.display().to_string(), None::<&str>).map_err(|e| format!("無法開啟資料夾：{e}"))?;
+        return Ok(Value::Null);
+    }
     if cmd == "open_external" {
-        if let Some(t) = args["target"].as_str().filter(|t| *t != "backups") {
+        if let Some(t) = args["target"].as_str() {
             let url = external_url(t)?;
             app.opener().open_url(url, None::<&str>).map_err(|e| format!("系統瀏覽器無法開啟連結：{e}"))?;
             return Ok(Value::Null);
@@ -3656,6 +3734,7 @@ fn qr_svg(text: &str) -> Option<String> {
     xml.find("<svg").map(|i| xml[i..].to_string())
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_private_ip(ip: &str) -> bool {
     ip.starts_with("192.168.")
         || ip.starts_with("10.")
@@ -3707,6 +3786,7 @@ fn sweep_for(id: &str, port: u16, ips: &[String]) -> Option<String> {
 
 /// Private IPv4 addresses of this machine, the default-route one first.
 fn lan_ips() -> Vec<String> {
+    #[cfg_attr(not(windows), allow(unused_mut))] // only Windows adds the ipconfig addresses
     let mut v: Vec<String> = local_ip().into_iter().collect();
     #[cfg(windows)]
     {
@@ -3770,6 +3850,7 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     upd.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
     app.restart()
 }
+#[cfg_attr(not(mobile), allow(dead_code))] // the phone's update check
 const RELEASES_API: &str = "https://api.github.com/repos/hankyleisplay/moneypi/releases";
 /// Update description for the preview channel: always the newest build, preview or stable (the release workflow keeps it).
 const PREVIEW_FEED: &str = "https://github.com/hankyleisplay/moneypi/releases/download/preview-channel/latest.json";
@@ -4910,6 +4991,27 @@ mod tests {
         d.snapshots = vec![Snapshot { date: "2026-11-13".into(), assets: 100.0, liabilities: 0.0 }, Snapshot { date: "2026-11-14".into(), assets: 0.0, liabilities: 0.0 }];
         d.assets.push(Asset { id: 1, name: "x".into(), currency: "TWD".into(), value: 1300.0, ..Default::default() });
         assert_eq!(widget_json(&d, "t")["change"], "較 11-13：+1,200");
+    }
+
+    // ------------------------------------------------------------- macOS / Linux
+
+    #[test]
+    fn cloudflared_and_the_computer_name_work_on_every_desktop() {
+        // this test machine is Linux x86_64: the plain binary, not an archive
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            assert_eq!(cloudflared_asset(), Some(("cloudflared-linux-amd64", false)));
+            assert_eq!(CF_EXE, "cloudflared");
+        }
+        // the macOS archive's program is found wherever it sits inside
+        let dir = std::env::temp_dir().join(format!("moneypi-cf-{}", random_hex(4)));
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/README"), "x").unwrap();
+        std::fs::write(dir.join("a/b/cloudflared"), "bin").unwrap();
+        assert_eq!(find_file_named(&dir, "cloudflared", 3), Some(dir.join("a/b/cloudflared")));
+        assert_eq!(find_file_named(&dir, "cloudflared", 0), None, "depth is limited");
+        let _ = std::fs::remove_dir_all(&dir);
+        // never empty, never panics
+        assert!(computer_name().map_or(true, |n| !n.trim().is_empty()));
     }
 
     #[test]

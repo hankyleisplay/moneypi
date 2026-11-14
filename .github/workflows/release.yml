@@ -1,14 +1,19 @@
-# Builds the Windows installers, signs them for the in-app updater, checks that nothing is missing and only then
+# Builds MoneyPi for Windows, macOS and Linux, signs the update files, checks that nothing is missing and only then
 # publishes the release (it stays a draft until every check passes, so users never see a half-built release).
 #
 # Run it either way:
 #   1. push a tag:           git tag v0.17.0 && git push origin v0.17.0
 #   2. Actions -> Release -> Run workflow, version "0.17.0"
 #
+# Jobs: prepare (checks, creates the draft) -> build (Windows, macOS universal, Linux at the same time, each uploads its
+# files to the draft) -> publish (one latest.json for every platform, made from the uploaded signatures; asset check;
+# notes; publish; preview feed) -> android (APK attached to the published release).
+#
 # Two channels: "0.22.0" is a stable release (what everybody gets), "0.22.0-preview.1" is a preview: a GitHub pre-release
-# that only people who chose the preview channel in Settings are offered. A preview is built as the NSIS installer only (the
-# MSI format cannot carry a "-preview.1" version), and the preview feed (release "preview-channel", its latest.json) is
+# that only people who chose the preview channel in Settings are offered. A preview skips the formats that cannot carry a
+# "-preview.1" version (Windows MSI, Linux rpm), and the preview feed (release "preview-channel", its latest.json) is
 # moved to the newest build, stable or preview, so the desktop app on the preview channel finds it.
+# macOS builds are ad-hoc signed (no Apple developer certificate), so the first launch needs "Open Anyway".
 # Needs the repository secret TAURI_SIGNING_PRIVATE_KEY (contents of the updater private key file) and, only if the
 # key has a password, TAURI_SIGNING_PRIVATE_KEY_PASSWORD. The notes live in release-notes/v<version>.md.
 name: Release
@@ -30,13 +35,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-latest
+  prepare:
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
-    defaults:
-      run:
-        shell: bash
+      pre: ${{ steps.ver.outputs.pre }}
+      release_id: ${{ steps.draft.outputs.id }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -51,11 +55,12 @@ jobs:
           set -euo pipefail
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then V="$INPUT_VERSION"; else V="$GITHUB_REF_NAME"; fi
           V="${V#v}"
-          echo "VERSION=$V" >> "$GITHUB_ENV"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
           node .github/scripts/version.mjs valid "$V" || { echo "::error::version must look like 0.22.0 or 0.22.0-preview.1, not '$V'"; exit 1; }
           PRE=$(node .github/scripts/version.mjs pre "$V")
+          echo "VERSION=$V" >> "$GITHUB_ENV"
           echo "PRE=$PRE" >> "$GITHUB_ENV"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "pre=$PRE" >> "$GITHUB_OUTPUT"
 
           [ -n "$SIGNING_KEY" ] || { echo "::error::Repository secret TAURI_SIGNING_PRIVATE_KEY is not set"; exit 1; }
 
@@ -69,36 +74,47 @@ jobs:
           notes="release-notes/v$V.md"
           [ -s "$notes" ] || { echo "::error::$notes is missing or empty - write the release notes first"; exit 1; }
 
-          # release body = notes + the standard install section (so no release ships without it);
-          # the updater prompt (latest.json "notes") gets just the notes
-          node - "$V" "$notes" "$RUNNER_TEMP" <<'JS'
-          const fs = require("fs");
-          const [v, file, tmp] = process.argv.slice(2);
-          const notes = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n").trim();
-          const pre = v.includes("-");
-          const body = (pre ? [
-            "> ⚠️ **這是預覽版（preview）**：提早試用新功能，可能還有沒修好的問題。只有在「設定 → 版本 → 更新頻道」選了「預覽版」的人才會收到更新提示；一般使用者不會被推送。重要資料請先匯出備份。",
-            "",
-            notes,
-            "",
-            "### 安裝與更新",
-            "- 電腦版：選了「預覽版」頻道的使用者會在啟動時收到更新提示；也可以手動安裝 `MoneyPi_" + v + "_x64-setup.exe`（預覽版只提供這個安裝檔）",
-            "- 手機版（Android）：下載下面的 APK 安裝，或在「設定 → 版本」選「預覽版」頻道後按「檢查更新」",
-            "- 安裝檔未經程式碼簽章，Windows SmartScreen 可能會提示，請選「更多資訊 → 仍要執行」",
-            "",
-          ] : [
-            notes,
-            "",
-            "### 安裝與更新",
-            "- 已安裝 v0.13.0 以上的使用者會在啟動時收到更新提示，一鍵更新",
-            "- v0.12.0 以前的使用者請先手動安裝一次（簽章金鑰已更換）",
-            "- 手動安裝：`MoneyPi_" + v + "_x64-setup.exe`（建議）或 `MoneyPi_" + v + "_x64_en-US.msi`",
-            "- 安裝檔未經程式碼簽章，Windows SmartScreen 可能會提示，請選「更多資訊 → 仍要執行」",
-            "",
-          ]).join("\n");
-          fs.writeFileSync(tmp + "/release-body.md", body);
-          fs.writeFileSync(tmp + "/update-notes.md", notes + "\n");
-          JS
+      # One draft for all three builds to upload into (three builds creating it themselves could make three drafts).
+      # A draft left over from a failed run of the same version is reused; a published one is never touched.
+      - name: Create the draft release
+        id: draft
+        run: |
+          set -euo pipefail
+          state=$(gh release view "v$VERSION" --json isDraft -q .isDraft 2>/dev/null || echo none)
+          if [ "$state" = "false" ]; then echo "::error::v$VERSION is already published"; exit 1; fi
+          if [ "$state" = "none" ]; then
+            flags=(--draft --target "$GITHUB_SHA" --title "MoneyPi v$VERSION" --notes "建置中…")
+            [ "$PRE" = "true" ] && flags+=(--prerelease)
+            gh release create "v$VERSION" "${flags[@]}"
+          fi
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" --jq ".[] | select(.tag_name == \"v$VERSION\") | .id" | head -1)
+          [ -n "$id" ] || { echo "::error::could not find the draft release v$VERSION"; exit 1; }
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "draft release v$VERSION: id $id"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+          - os: macos-latest
+            name: macOS
+          - os: ubuntu-22.04
+            name: Linux
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRE: ${{ needs.prepare.outputs.pre }}
+    steps:
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
         with:
@@ -106,16 +122,27 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS: one universal app for Intel and Apple-chip Macs
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.name }}
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
 
       - run: npm ci
 
       # Fetch via the official GitHub API when the browser download endpoint times out.
       # Hash pinned by tauri-cli 2.12.4's tauri-bundler Windows MSI implementation.
       - name: Prepare verified WiX toolchain
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
@@ -130,6 +157,7 @@ jobs:
           Expand-Archive -Path $archive -DestinationPath $tools -Force
 
       - name: Prepare verified NSIS toolchain
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           gh release download nsis-3.13 --repo tauri-apps/binary-releases --pattern nsis-3.13.zip --dir $env:RUNNER_TEMP --clobber
@@ -153,60 +181,51 @@ jobs:
           New-Item -ItemType Directory -Force -Path $plugins | Out-Null
           Copy-Item $plugin $plugins -Force
 
-      - name: Build, sign and upload to a draft release
+      # Which files each platform builds. A preview skips the formats whose version field cannot hold "-preview.1".
+      - name: Choose what to build
+        id: what
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Windows) [ "$PRE" = "true" ] && a="--bundles nsis" || a="" ;;
+            macOS)   a="--target universal-apple-darwin --bundles app,dmg" ;;
+            Linux)   [ "$PRE" = "true" ] && a="--bundles deb,appimage" || a="--bundles deb,rpm,appimage" ;;
+          esac
+          echo "args=$a" >> "$GITHUB_OUTPUT"
+          echo "$RUNNER_OS: tauri build $a"
+
+      - name: Build, sign and upload to the draft release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: v${{ env.VERSION }}
-          releaseName: MoneyPi v${{ env.VERSION }}
-          releaseCommitish: ${{ github.sha }}
-          releaseDraft: true
-          prerelease: ${{ env.PRE == 'true' }}
-          args: ${{ env.PRE == 'true' && '--bundles nsis' || '' }}
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          args: ${{ steps.what.outputs.args }}
+          # the publish job writes the real latest.json for every platform from the uploaded signatures
+          includeUpdaterJson: false
 
-      - name: Put the update notes into latest.json
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PRE: ${{ needs.prepare.outputs.pre }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check that nothing is missing and write latest.json for every platform
         run: |
           set -euo pipefail
-          gh release download "v$VERSION" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
-          node - "$RUNNER_TEMP" <<'JS'
-          const fs = require("fs");
-          const t = process.argv[2];
-          const j = JSON.parse(fs.readFileSync(t + "/latest.json", "utf8"));
-          j.notes = fs.readFileSync(t + "/update-notes.md", "utf8").trim();
-          fs.writeFileSync(t + "/latest.json", JSON.stringify(j, null, 2) + "\n");
-          JS
+          gh release view "v$VERSION" --json assets > "$RUNNER_TEMP/assets.json"
+          mkdir -p "$RUNNER_TEMP/sigs"
+          gh release download "v$VERSION" --pattern "*.sig" --dir "$RUNNER_TEMP/sigs" --clobber
+          node .github/scripts/release-body.mjs "$VERSION" "release-notes/v$VERSION.md" "$RUNNER_TEMP"
+          node .github/scripts/updater-json.mjs "$VERSION" "$RUNNER_TEMP/update-notes.md" "$RUNNER_TEMP/assets.json" "$RUNNER_TEMP/sigs" "$RUNNER_TEMP/latest.json" "$GITHUB_REPOSITORY"
           gh release upload "v$VERSION" "$RUNNER_TEMP/latest.json" --clobber
-
-      - name: Check that nothing is missing
-        run: |
-          set -euo pipefail
-          V="$VERSION"
-          gh release view "v$V" --json assets,isDraft > "$RUNNER_TEMP/release.json"
-          node - "$V" "$RUNNER_TEMP/release.json" <<'JS'
-          const [v, file] = process.argv.slice(2);
-          const r = JSON.parse(require("fs").readFileSync(file, "utf8"));
-          const have = new Set(r.assets.map((a) => a.name));
-          const pre = v.includes("-"); // a preview ships the NSIS installer only
-          const need = [`MoneyPi_${v}_x64-setup.exe`, `MoneyPi_${v}_x64-setup.exe.sig`, ...(pre ? [] : [`MoneyPi_${v}_x64_en-US.msi`, `MoneyPi_${v}_x64_en-US.msi.sig`]), "latest.json"];
-          const missing = need.filter((n) => !have.has(n));
-          if (missing.length) { console.log("::error::Missing release assets: " + missing.join(", ")); process.exit(1); }
-          console.log("assets ok:", need.join(", "));
-          JS
-          gh release download "v$V" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
-          node - "$V" "$RUNNER_TEMP/latest.json" <<'JS'
-          const [v, file] = process.argv.slice(2);
-          const j = JSON.parse(require("fs").readFileSync(file, "utf8"));
-          const p = j.platforms && j.platforms["windows-x86_64"];
-          if (!j.notes || !j.notes.trim()) { console.log("::error::latest.json has no update notes"); process.exit(1); }
-          if (j.version !== v) { console.log(`::error::latest.json version ${j.version} != ${v}`); process.exit(1); }
-          if (!p || !p.signature || !p.url.endsWith(`MoneyPi_${v}_x64-setup.exe`)) { console.log("::error::latest.json has no valid windows-x86_64 entry"); process.exit(1); }
-          console.log("latest.json ok");
-          JS
+          gh release view "v$VERSION" --json assets -q '.assets[].name'
 
       - name: Write the notes and publish
         run: |
@@ -243,10 +262,10 @@ jobs:
             echo "preview feed stays at $CUR (newer than $VERSION)"
           fi
 
-  # the Android app is built after the Windows release is public and attached to it (its own signing key, see android.yml)
+  # the Android app is built after the desktop release is public and attached to it (its own signing key, see android.yml)
   android:
-    needs: release
+    needs: [prepare, publish]
     uses: ./.github/workflows/android.yml
     with:
-      version: ${{ needs.release.outputs.version }}
+      version: ${{ needs.prepare.outputs.version }}
     secrets: inherit
