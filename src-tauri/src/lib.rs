@@ -160,6 +160,43 @@ struct Plan {
     status: String,
 }
 
+/// A fixed income or expense (salary, rent, a subscription) that books itself into the ledger every month on `day`
+/// (the last day for short months). Every device books it, under an id made from the rule and the date, so two devices
+/// end up with the very same entry instead of two, and an entry the user deleted stays deleted (its tombstone remains).
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+struct Recurring {
+    #[serde(default)]
+    id: u64,
+    /// "in" | "out"
+    kind: String,
+    category: String,
+    amount: f64,
+    #[serde(default)]
+    note: String,
+    day: u32,
+    start: String,
+    /// Empty = no end.
+    #[serde(default)]
+    end: String,
+    #[serde(default)]
+    paused: bool,
+}
+
+/// "Tell me when this holding's price goes above / below X" (in the holding's own currency). A device setting: each
+/// device notifies for its own alerts while the app runs; never synced. One-shot: `fired` holds when it triggered.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+struct Alert {
+    #[serde(default)]
+    id: u64,
+    asset: u64,
+    /// "above" | "below"
+    op: String,
+    price: f64,
+    /// "YYYY-MM-DD HH:MM" when it triggered; empty = still watching
+    #[serde(default)]
+    fired: String,
+}
+
 /// One income/expense entry of the bookkeeping ledger (in the base currency).
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Flow {
@@ -218,6 +255,21 @@ struct Data {
     plans: Vec<Plan>,
     #[serde(default)]
     next_plan: u64,
+    #[serde(default)]
+    recurring: Vec<Recurring>,
+    #[serde(default)]
+    next_rec: u64,
+    /// Price alerts of this device (never synced, kept when a backup is restored).
+    #[serde(default)]
+    alerts: Vec<Alert>,
+    /// Phone app lock: ask for the fingerprint / face / screen lock when the app opens (a device setting).
+    #[serde(default)]
+    app_lock: bool,
+    /// Home-screen widget shows the net worth (opt-in, a device setting): every save also writes moneypi-widget.json.
+    #[serde(default)]
+    widget: bool,
+    #[serde(default)]
+    next_alert: u64,
     /// Daily copy of the data file (encrypted too, when a password is set).
     #[serde(default)]
     backup_on: bool,
@@ -350,6 +402,12 @@ impl Default for Data {
             next_flow: 0,
             plans: vec![],
             next_plan: 0,
+            recurring: vec![],
+            next_rec: 0,
+            alerts: vec![],
+            next_alert: 0,
+            app_lock: false,
+            widget: false,
             backup_on: false,
             backup_dir: String::new(),
             backup_keep: default_keep(),
@@ -509,6 +567,9 @@ fn stamp(d: &mut Data, now: u64) {
     for p in &d.plans {
         live.insert(format!("p:{}", p.id), json_digest(p));
     }
+    for r in &d.recurring {
+        live.insert(format!("r:{}", r.id), json_digest(r));
+    }
     for (k, h) in &live {
         match d.stamps.get(k) {
             Some(s) if !s.del && s.h == *h => {}
@@ -535,6 +596,9 @@ struct SyncPayload {
     cashflow: Vec<Flow>,
     #[serde(default)]
     plans: Vec<Plan>,
+    /// Absent from older versions: then there is simply nothing to merge (they never send "r:" stamps either).
+    #[serde(default)]
+    recurring: Vec<Recurring>,
     #[serde(default)]
     snapshots: Vec<Snapshot>,
     #[serde(default)]
@@ -554,7 +618,7 @@ struct SyncPayload {
 
 /// A brand-new install: no currency chosen yet and nothing entered.
 fn is_fresh(d: &Data) -> bool {
-    !d.base_set && d.assets.is_empty() && d.cashflow.is_empty() && d.goals.is_empty() && d.plans.is_empty()
+    !d.base_set && d.assets.is_empty() && d.cashflow.is_empty() && d.goals.is_empty() && d.plans.is_empty() && d.recurring.is_empty()
 }
 
 fn sync_payload(d: &Data) -> SyncPayload {
@@ -563,6 +627,7 @@ fn sync_payload(d: &Data) -> SyncPayload {
         goals: d.goals.clone(),
         cashflow: d.cashflow.clone(),
         plans: d.plans.clone(),
+        recurring: d.recurring.clone(),
         snapshots: d.snapshots.clone(),
         rates: d.rates.clone(),
         stamps: d.stamps.clone(),
@@ -658,6 +723,7 @@ fn merge_payload(d: &mut Data, remote: &SyncPayload, now: u64, base: u64) -> usi
     merge_records(&mut d.goals, &remote.goals, |g| g.id, "g:", &mut stamps, &remote.stamps, None);
     merge_records(&mut d.cashflow, &remote.cashflow, |f| f.id, "f:", &mut stamps, &remote.stamps, None);
     merge_records(&mut d.plans, &remote.plans, |p| p.id, "p:", &mut stamps, &remote.stamps, None);
+    merge_records(&mut d.recurring, &remote.recurring, |r| r.id, "r:", &mut stamps, &remote.stamps, None);
     d.stamps = stamps;
     let changed = d.stamps.iter().filter(|(k, v)| before.get(*k) != Some(*v)).count();
     add_missing_snapshots(&mut d.snapshots, remote.snapshots.clone(), "9999-12-31");
@@ -909,6 +975,156 @@ fn due_dates(p: &Plan, today: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
         if m == 12 { y += 1; m = 1 } else { m += 1 }
     }
     out
+}
+
+/// The day of a month a monthly schedule falls on: `day`, or the month's last day when it is shorter.
+fn month_day(y: i32, m: u32, day: u32) -> chrono::NaiveDate {
+    let mut d = day.clamp(1, 31);
+    loop {
+        if let Some(x) = chrono::NaiveDate::from_ymd_opt(y, m, d) {
+            return x;
+        }
+        d -= 1;
+    }
+}
+
+/// Dates a fixed income/expense is due on, from its start up to `today` (and its end), at most the last 120.
+fn recurring_dates(r: &Recurring, today: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
+    use chrono::Datelike;
+    let Ok(start) = chrono::NaiveDate::parse_from_str(&r.start, "%Y-%m-%d") else { return vec![] };
+    let end = chrono::NaiveDate::parse_from_str(&r.end, "%Y-%m-%d").unwrap_or(today).min(today);
+    let (mut y, mut m) = (start.year(), start.month());
+    let mut out = vec![];
+    loop {
+        let date = month_day(y, m, r.day);
+        if date > end {
+            break;
+        }
+        if date >= start {
+            out.push(date);
+        }
+        if m == 12 { y += 1; m = 1 } else { m += 1 }
+    }
+    let skip = out.len().saturating_sub(120);
+    out.split_off(skip)
+}
+
+/// Id of the ledger entry a fixed income/expense books on `date`: the same on every device. Bit 52 keeps it apart from
+/// the ids devices hand out (below 2^48) and the value stays below 2^53, exact in JavaScript.
+fn recurring_entry_id(rule: u64, date: &str) -> u64 {
+    (1u64 << 52) | (fnv(format!("{rule}|{date}").as_bytes()) & ((1u64 << 52) - 1))
+}
+
+fn validate_recurring(r: &Recurring) -> Result<(), String> {
+    if !matches!(r.kind.as_str(), "in" | "out") {
+        return Err("未知的收支類型".into());
+    }
+    if !r.amount.is_finite() || r.amount <= 0.0 {
+        return Err("金額必須大於 0".into());
+    }
+    if r.category.trim().is_empty() || r.category.chars().count() > 20 {
+        return Err("請選擇類別".into());
+    }
+    if r.note.chars().count() > 60 {
+        return Err("備註太長了".into());
+    }
+    if !(1..=31).contains(&r.day) {
+        return Err("每月幾號需為 1–31".into());
+    }
+    if !valid_date(&r.start) {
+        return Err("開始日期格式需為 YYYY-MM-DD".into());
+    }
+    if !r.end.is_empty() && (!valid_date(&r.end) || r.end < r.start) {
+        return Err("結束日期需為 YYYY-MM-DD，且不早於開始日期".into());
+    }
+    Ok(())
+}
+
+/// Book every due, not yet booked (or deleted) entry of every active fixed income/expense. Returns how many were added.
+fn book_recurring(d: &mut Data, today: chrono::NaiveDate) -> usize {
+    let mut added = 0;
+    for r in d.recurring.clone() {
+        if r.paused {
+            continue;
+        }
+        for date in recurring_dates(&r, today) {
+            let ds = date.format("%Y-%m-%d").to_string();
+            let id = recurring_entry_id(r.id, &ds);
+            // already there, or there once and deleted by the user (a tombstone): leave it
+            if d.cashflow.iter().any(|f| f.id == id) || d.stamps.contains_key(&format!("f:{id}")) {
+                continue;
+            }
+            let note = if r.note.trim().is_empty() { "固定收支".to_string() } else { r.note.clone() };
+            d.cashflow.push(Flow { id, date: ds, kind: r.kind.clone(), category: r.category.clone(), amount: r.amount, note });
+            added += 1;
+        }
+    }
+    added
+}
+
+/// Fire every watching alert whose holding's current price crossed its line. Returns what fired, for the notification.
+fn check_alerts(d: &mut Data, now: &str) -> Vec<Value> {
+    let mut hits = vec![];
+    let assets = d.assets.clone();
+    for al in d.alerts.iter_mut().filter(|a| a.fired.is_empty()) {
+        let Some(a) = assets.iter().find(|a| a.id == al.asset) else { continue };
+        if a.price <= 0.0 {
+            continue;
+        }
+        let hit = if al.op == "above" { a.price >= al.price } else { a.price <= al.price };
+        if hit {
+            al.fired = now.to_string();
+            hits.push(json!({ "id": al.id, "name": a.name, "symbol": a.symbol, "op": al.op, "target": al.price, "price": a.price, "currency": a.currency }));
+        }
+    }
+    hits
+}
+
+fn alert_text(h: &Value) -> (String, String) {
+    let name = h["name"].as_str().unwrap_or("");
+    let up = h["op"] == "above";
+    let title = format!("{name} {}到價", if up { "漲" } else { "跌" });
+    let body = format!(
+        "現價 {} {}，已{} 你設的 {}",
+        h["price"].as_f64().map(|p| format!("{}", r4(p))).unwrap_or_default(),
+        h["currency"].as_str().unwrap_or(""),
+        if up { "高於" } else { "低於" },
+        h["target"].as_f64().map(|p| format!("{}", r4(p))).unwrap_or_default()
+    );
+    (title, body)
+}
+
+/// "1234567.8" -> "1,234,568" (whole units, like the app shows totals).
+fn grouped(v: f64) -> String {
+    let n = v.abs().round() as u64;
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if v < 0.0 && n > 0 { format!("−{out}") } else { out }
+}
+
+fn currency_symbol(code: &str) -> String {
+    match code {
+        "TWD" => "NT$", "USD" => "US$", "JPY" => "¥", "CNY" => "CN¥", "EUR" => "€", "GBP" => "£", "HKD" => "HK$", "KRW" => "₩",
+        "AUD" => "A$", "CAD" => "C$", "SGD" => "S$", "NZD" => "NZ$", "THB" => "฿", "MYR" => "RM", "VND" => "₫", "PHP" => "₱", "INR" => "₹",
+        other => other,
+    }
+    .to_string()
+}
+
+/// What the home-screen widget shows: the net worth now and the change since the previous day with a snapshot.
+fn widget_json(d: &Data, updated: &str) -> Value {
+    let net: f64 = d.assets.iter().map(|a| if a.liability { -in_base(d, a) } else { in_base(d, a) }).sum();
+    let change = d.snapshots.len().checked_sub(2).and_then(|i| d.snapshots.get(i)).map(|p| {
+        let diff = net - (p.assets - p.liabilities);
+        format!("較 {}：{}{}", p.date.get(5..).unwrap_or(&p.date), if diff >= 0.0 { "+" } else { "−" }, grouped(diff.abs()))
+    });
+    json!({ "enabled": true, "net": format!("{} {}", currency_symbol(&d.base), grouped(net)), "change": change.unwrap_or_default(), "updated": updated })
 }
 
 fn validate_tx(t: &Tx) -> Result<(), String> {
@@ -1350,8 +1566,26 @@ impl Core {
         let tmp = self.path.with_extension("json.tmp");
         fs::write(&tmp, out).map_err(|e| e.to_string())?;
         fs::rename(&tmp, &self.path).map_err(|e| e.to_string())?;
+        if d.widget {
+            let _ = fs::write(self.widget_path(), widget_json(d, &chrono::Local::now().format("%m/%d %H:%M").to_string()).to_string());
+        }
         self.bump();
         Ok(())
+    }
+
+    /// Read by the Android home-screen widget (NetWorthWidget.kt looks for it next to the data file).
+    fn widget_path(&self) -> PathBuf {
+        self.path.with_file_name("moneypi-widget.json")
+    }
+
+    fn set_widget(&self, on: bool) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.widget = on;
+        self.persist(&mut d)?;
+        if !on {
+            let _ = fs::write(self.widget_path(), json!({ "enabled": false }).to_string()); // the widget then says how to turn it on
+        }
+        Ok(view(&d))
     }
 
     fn is_locked(&self) -> bool {
@@ -1582,6 +1816,83 @@ impl Core {
         Ok(view(&d))
     }
 
+    /// Add or change a price alert (saving one again with an empty `fired` re-arms it).
+    fn save_alert(&self, mut al: Alert) -> Result<Value, String> {
+        if !matches!(al.op.as_str(), "above" | "below") {
+            return Err("請選擇「高於」或「低於」".into());
+        }
+        if !al.price.is_finite() || al.price <= 0.0 {
+            return Err("價格必須大於 0".into());
+        }
+        let mut d = self.data.lock().unwrap();
+        let a = d.assets.iter().find(|a| a.id == al.asset).ok_or("找不到該項目")?;
+        if !a.holding || a.market.is_empty() {
+            return Err("只有有行情代號的持倉可以設定到價通知".into());
+        }
+        if al.id == 0 {
+            if d.alerts.len() >= 100 {
+                return Err("到價通知太多了".into());
+            }
+            d.next_alert += 1;
+            al.id = d.next_alert;
+            d.alerts.push(al);
+        } else {
+            let slot = d.alerts.iter_mut().find(|x| x.id == al.id).ok_or("找不到這個通知")?;
+            *slot = al;
+        }
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn set_app_lock(&self, on: bool) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.app_lock = on;
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn delete_alert(&self, id: u64) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.alerts.retain(|a| a.id != id);
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn save_recurring(&self, mut r: Recurring) -> Result<Value, String> {
+        r.category = r.category.trim().to_string();
+        r.note = r.note.trim().to_string();
+        validate_recurring(&r)?;
+        let mut d = self.data.lock().unwrap();
+        if r.id == 0 {
+            let dev = d.device;
+            r.id = next_record_id(&mut d.next_rec, dev);
+            d.recurring.push(r);
+        } else {
+            let slot = d.recurring.iter_mut().find(|x| x.id == r.id).ok_or("找不到這個固定收支")?;
+            *slot = r;
+        }
+        book_recurring(&mut d, chrono::Local::now().date_naive());
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn delete_recurring(&self, id: u64) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.recurring.retain(|r| r.id != id); // what it already booked stays in the ledger
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    /// Called at start-up and every hour, on every device (the shared ids keep two devices from booking twice).
+    fn run_recurring(&self) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        let added = book_recurring(&mut d, chrono::Local::now().date_naive());
+        if added > 0 {
+            self.persist(&mut d)?;
+        }
+        Ok(json!({ "added": added, "data": view(&d) }))
+    }
+
     fn delete_flow(&self, id: u64) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
         d.cashflow.retain(|f| f.id != id);
@@ -1620,6 +1931,10 @@ impl Core {
         let mut d = self.data.lock().unwrap();
         // The backup only carries finance data; keep this machine's own sync settings.
         inc.channel = d.channel.clone();
+        inc.alerts = d.alerts.clone();
+        inc.app_lock = d.app_lock;
+        inc.widget = d.widget;
+        inc.next_alert = d.next_alert;
         if inc.prefs != d.prefs {
             inc.prefs.at = now_ms(); // what was restored is the newest version, also for the paired device
         }
@@ -1636,6 +1951,7 @@ impl Core {
         inc.next_flow = counter_floor(inc.cashflow.iter().map(|f| f.id), inc.device, inc.next_flow);
         inc.next_goal = counter_floor(inc.goals.iter().map(|g| g.id), inc.device, inc.next_goal);
         inc.next_plan = counter_floor(inc.plans.iter().map(|p| p.id), inc.device, inc.next_plan);
+        inc.next_rec = counter_floor(inc.recurring.iter().map(|r| r.id), inc.device, inc.next_rec);
         let _ = fs::copy(&self.path, self.path.with_extension("before-restore.json"));
         for a in inc.assets.iter_mut() {
             recompute(a);
@@ -2088,8 +2404,9 @@ impl Core {
         for a in d.assets.iter_mut() {
             recompute(a);
         }
+        let hits = check_alerts(&mut d, &stamp);
         self.commit(&mut d)?;
-        Ok(json!({ "data": view(&d), "updated": updated, "rates": fx.len(), "failed": failed }))
+        Ok(json!({ "data": view(&d), "updated": updated, "rates": fx.len(), "failed": failed, "alerts": hits }))
     }
 
     // --------------------------------------------------------------- CSV
@@ -2203,6 +2520,9 @@ impl Core {
         }
         for b in d.prefs.budgets.values_mut() {
             *b /= f;
+        }
+        for r in d.recurring.iter_mut() {
+            r.amount /= f;
         }
         if !d.prefs.budgets.is_empty() {
             d.prefs.at = now_ms();
@@ -3142,6 +3462,13 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
         "add_flow" => core.add_flow(arg(&args, "flow")?),
         "delete_flow" => core.delete_flow(arg(&args, "id")?),
+        "save_recurring" => core.save_recurring(arg(&args, "rule")?),
+        "save_alert" if !remote => core.save_alert(arg(&args, "alert")?),
+        "delete_alert" if !remote => core.delete_alert(arg(&args, "id")?),
+        "set_app_lock" if !remote => core.set_app_lock(arg(&args, "on")?),
+        "set_widget" if !remote => core.set_widget(arg(&args, "on")?),
+        "delete_recurring" => core.delete_recurring(arg(&args, "id")?),
+        "run_recurring" => core.run_recurring(),
         "export_backup" => Ok(Value::String(core.export_backup())),
         "import_backup" => core.import_backup(&arg::<String>(&args, "text")?, args["password"].as_str()),
         "tunnel_status" if !remote => Ok(core.tunnel_status()),
@@ -3174,10 +3501,49 @@ async fn call(app: AppHandle, state: State<'_, Arc<Core>>, cmd: String, args: Va
             return Ok(Value::Null);
         }
     }
+    // The phone's lock screen: the system fingerprint / face prompt, with the screen-lock PIN as fallback.
+    if cmd == "bio_auth" {
+        let reason = args["reason"].as_str().unwrap_or("解鎖 MoneyPi").to_string();
+        let app = app.clone();
+        return tauri::async_runtime::spawn_blocking(move || bio_auth(&app, reason)).await.map_err(|e| e.to_string());
+    }
     let core = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || dispatch(&core, &cmd, args, false))
-        .await
-        .map_err(|e| e.to_string())?
+    let c = cmd.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || dispatch(&core, &c, args, false)).await.map_err(|e| e.to_string())??;
+    use tauri_plugin_notification::NotificationExt;
+    // A new price alert: ask for the notification permission once (Android 13+ shows the system question).
+    if cmd == "save_alert" {
+        let n = app.notification();
+        if !matches!(n.permission_state(), Ok(tauri_plugin_notification::PermissionState::Granted)) {
+            let _ = n.request_permission();
+        }
+    }
+    // Prices crossed an alert line: tell the user with a system notification (the page shows a message too).
+    if cmd == "refresh_quotes" {
+        for h in out["alerts"].as_array().into_iter().flatten() {
+            let (title, body) = alert_text(h);
+            let _ = app.notification().builder().title(title).body(body).show();
+        }
+    }
+    Ok(out)
+}
+
+/// {ok} or {ok: false, code, message}. "passcodeNotSet" means the phone has no screen lock at all (nothing to unlock with).
+#[cfg(mobile)]
+fn bio_auth(app: &AppHandle, reason: String) -> Value {
+    use tauri_plugin_biometric::{AuthOptions, BiometricExt};
+    let opts = AuthOptions { allow_device_credential: true, title: Some("MoneyPi".into()), confirmation_required: Some(false), ..Default::default() };
+    match app.biometric().authenticate(reason, opts) {
+        Ok(()) => json!({ "ok": true }),
+        Err(tauri_plugin_biometric::Error::PluginInvoke(tauri::plugin::mobile::PluginInvokeError::InvokeRejected(r))) => {
+            json!({ "ok": false, "code": r.code.unwrap_or_default(), "message": r.message.unwrap_or_default() })
+        }
+        Err(e) => json!({ "ok": false, "code": "error", "message": e.to_string() }),
+    }
+}
+#[cfg(not(mobile))]
+fn bio_auth(_app: &AppHandle, _reason: String) -> Value {
+    json!({ "ok": false, "code": "unsupported", "message": "只有手機版支援" })
 }
 
 // ------------------------------------------------------------ HTTP (LAN sync)
@@ -3479,9 +3845,11 @@ async fn install_update(_app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
-    let builder = builder.plugin(tauri_plugin_opener::init());
+    let builder = builder.plugin(tauri_plugin_opener::init()).plugin(tauri_plugin_notification::init());
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_biometric::init());
     builder
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
@@ -4361,6 +4729,187 @@ mod tests {
         let d = c.data.lock().unwrap();
         assert!((d.prefs.budgets["餐飲"] - 3200.0 / usd).abs() < 1e-9);
         assert_eq!(d.prefs.alloc["現金"], 30.0, "percentages do not change");
+    }
+
+    // ------------------------------------------------------------- fixed income / expenses
+
+    fn rule(kind: &str, amount: f64, day: u32, start: &str) -> Value {
+        json!({ "kind": kind, "category": if kind == "in" { "薪資" } else { "居住" }, "amount": amount, "note": "", "day": day, "start": start })
+    }
+    fn booked(c: &Arc<Core>) -> Vec<(String, f64)> {
+        let mut v: Vec<(String, f64)> = c.data.lock().unwrap().cashflow.iter().filter(|f| f.id >= 1 << 52).map(|f| (f.date.clone(), f.amount)).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    #[test]
+    fn recurring_dates_fall_on_the_day_or_the_months_last_day() {
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let r = Recurring { day: 31, start: "2026-01-15".into(), ..Default::default() };
+        let got: Vec<String> = recurring_dates(&r, d("2026-04-30")).iter().map(|x| x.to_string()).collect();
+        assert_eq!(got, ["2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30"]);
+        let r = Recurring { day: 5, start: "2026-01-06".into(), end: "2026-03-05".into(), ..Default::default() };
+        let got: Vec<String> = recurring_dates(&r, d("2026-12-31")).iter().map(|x| x.to_string()).collect();
+        assert_eq!(got, ["2026-02-05", "2026-03-05"], "not before the start, not after the end");
+        let r = Recurring { day: 1, start: "1990-01-01".into(), ..Default::default() };
+        assert_eq!(recurring_dates(&r, d("2026-01-01")).len(), 120, "a start far back books at most 120 months");
+        assert!(recurring_entry_id(7, "2026-01-01") >= 1 << 52 && recurring_entry_id(7, "2026-01-01") < 1 << 53);
+        assert_ne!(recurring_entry_id(7, "2026-01-01"), recurring_entry_id(7, "2026-02-01"));
+    }
+
+    #[test]
+    fn a_fixed_entry_books_once_and_a_deleted_one_stays_deleted() {
+        let c = Arc::new(temp_core("rec"));
+        let start = (chrono::Local::now().date_naive() - chrono::Duration::days(70)).format("%Y-%m-%d").to_string();
+        let v = dispatch(&c, "save_recurring", json!({ "rule": rule("in", 50000.0, 5, &start) }), false).unwrap();
+        let n = booked(&c).len();
+        assert!((2..=3).contains(&n), "the past two or three months are booked right away ({n})");
+        assert_eq!(v["recurring"].as_array().unwrap().len(), 1);
+        dispatch(&c, "run_recurring", json!({}), false).unwrap();
+        assert_eq!(booked(&c).len(), n, "running again adds nothing");
+        // delete one booked entry: it does not come back
+        let first = c.data.lock().unwrap().cashflow.iter().find(|f| f.id >= 1 << 52).unwrap().id;
+        dispatch(&c, "delete_flow", json!({ "id": first }), false).unwrap();
+        dispatch(&c, "run_recurring", json!({}), false).unwrap();
+        assert_eq!(booked(&c).len(), n - 1);
+        // pausing stops it; editing changes only what comes later; deleting the rule keeps what it booked
+        let id = c.data.lock().unwrap().recurring[0].id;
+        let mut r = rule("in", 1.0, 5, "2020-01-01");
+        r["id"] = json!(id);
+        r["paused"] = json!(true);
+        dispatch(&c, "save_recurring", json!({ "rule": r }), false).unwrap();
+        assert_eq!(booked(&c).len(), n - 1, "paused: nothing new, even with an earlier start");
+        dispatch(&c, "delete_recurring", json!({ "id": id }), false).unwrap();
+        assert!(c.data.lock().unwrap().recurring.is_empty());
+        assert_eq!(booked(&c).len(), n - 1);
+        for bad in [rule("x", 1.0, 5, "2026-01-01"), rule("in", 0.0, 5, "2026-01-01"), rule("in", 1.0, 0, "2026-01-01"), rule("in", 1.0, 32, "2026-01-01"), rule("in", 1.0, 5, "2026/1/1")] {
+            assert!(dispatch(&c, "save_recurring", json!({ "rule": bad.clone() }), false).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn two_devices_book_the_same_fixed_entries_without_duplicates() {
+        let (pc, phone) = pair();
+        let start = (chrono::Local::now().date_naive() - chrono::Duration::days(100)).format("%Y-%m-%d").to_string();
+        dispatch(&pc, "save_recurring", json!({ "rule": rule("out", 12000.0, 1, &start) }), false).unwrap();
+        let on_pc = booked(&pc);
+        exchange(&pc, &phone);
+        dispatch(&phone, "run_recurring", json!({}), false).unwrap(); // the phone books too, on its own
+        dispatch(&pc, "run_recurring", json!({}), false).unwrap();
+        exchange(&pc, &phone);
+        exchange(&pc, &phone);
+        assert_eq!(booked(&pc), on_pc, "the PC has each month once");
+        assert_eq!(booked(&phone), on_pc, "and so has the phone");
+        // a deletion on the phone reaches the PC and is not re-booked there
+        let id = phone.data.lock().unwrap().cashflow.iter().find(|f| f.id >= 1 << 52).unwrap().id;
+        dispatch(&phone, "delete_flow", json!({ "id": id }), false).unwrap();
+        exchange(&pc, &phone);
+        dispatch(&pc, "run_recurring", json!({}), false).unwrap();
+        assert_eq!(booked(&pc).len(), on_pc.len() - 1);
+        // an older peer sends no rules at all: ours stay
+        let mut old = sync_payload(&phone.data.lock().unwrap());
+        old.recurring.clear();
+        old.stamps.retain(|k, _| !k.starts_with("r:"));
+        pc.sync(old).unwrap();
+        assert_eq!(pc.data.lock().unwrap().recurring.len(), 1);
+    }
+
+    #[test]
+    fn changing_the_main_currency_converts_fixed_entries() {
+        let c = Arc::new(temp_core("recbase"));
+        dispatch(&c, "set_base", json!({ "code": "TWD" }), false).unwrap();
+        save(&c, cash("存款", 100.0));
+        dispatch(&c, "save_recurring", json!({ "rule": rule("in", 32000.0, 1, "2099-01-01") }), false).unwrap();
+        let usd = c.data.lock().unwrap().rates["USD"];
+        dispatch(&c, "set_base", json!({ "code": "USD" }), false).unwrap();
+        assert!((c.data.lock().unwrap().recurring[0].amount - 32000.0 / usd).abs() < 1e-9);
+    }
+
+    // ------------------------------------------------------------- price alerts
+
+    #[test]
+    fn price_alerts_fire_once_when_the_price_crosses_and_can_be_re_armed() {
+        let c = Arc::new(temp_core("alerts"));
+        let mut st = stock_json("台積電");
+        st["market"] = json!("tw");
+        st["symbol"] = json!("2330");
+        st["price"] = json!(1000.0);
+        save(&c, st);
+        let id = c.data.lock().unwrap().assets[0].id;
+        save(&c, cash("存款", 1.0));
+        let cash_id = c.data.lock().unwrap().assets[1].id;
+        dispatch(&c, "save_alert", json!({ "alert": { "asset": id, "op": "above", "price": 1100.0 } }), false).unwrap();
+        dispatch(&c, "save_alert", json!({ "alert": { "asset": id, "op": "below", "price": 900.0 } }), false).unwrap();
+        for bad in [json!({ "asset": id, "op": "near", "price": 1.0 }), json!({ "asset": id, "op": "above", "price": 0.0 }), json!({ "asset": cash_id, "op": "above", "price": 1.0 }), json!({ "asset": 999, "op": "above", "price": 1.0 })] {
+            assert!(dispatch(&c, "save_alert", json!({ "alert": bad.clone() }), false).is_err(), "{bad}");
+        }
+        assert!(dispatch(&c, "save_alert", json!({ "alert": { "asset": id, "op": "above", "price": 1.0 } }), true).is_err(), "not from another device");
+        let mut d = c.data.lock().unwrap();
+        assert!(check_alerts(&mut d, "t0").is_empty(), "1000 is between the lines");
+        d.assets[0].price = 1150.0;
+        let hits = check_alerts(&mut d, "t1");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["op"], "above");
+        let (title, body) = alert_text(&hits[0]);
+        assert!(title.contains("台積電") && title.contains("漲"), "{title}");
+        assert!(body.contains("1150") && body.contains("1100"), "{body}");
+        assert!(check_alerts(&mut d, "t2").is_empty(), "fires once");
+        assert_eq!(d.alerts[0].fired, "t1");
+        drop(d);
+        // re-arm by saving it with an empty `fired`
+        let mut al = serde_json::to_value(c.data.lock().unwrap().alerts[0].clone()).unwrap();
+        al["fired"] = json!("");
+        dispatch(&c, "save_alert", json!({ "alert": al }), false).unwrap();
+        assert_eq!(check_alerts(&mut c.data.lock().unwrap(), "t3").len(), 1);
+        dispatch(&c, "delete_alert", json!({ "id": 2 }), false).unwrap();
+        assert_eq!(c.data.lock().unwrap().alerts.len(), 1);
+    }
+
+    #[test]
+    fn price_alerts_stay_on_their_device() {
+        let (pc, phone) = pair();
+        let mut st = stock_json("ETF");
+        st["market"] = json!("tw");
+        st["symbol"] = json!("0050");
+        save(&pc, st);
+        let id = pc.data.lock().unwrap().assets[0].id;
+        dispatch(&pc, "save_alert", json!({ "alert": { "asset": id, "op": "above", "price": 200.0 } }), false).unwrap();
+        exchange(&pc, &phone);
+        assert!(phone.data.lock().unwrap().alerts.is_empty(), "not synced");
+        assert!(!serde_json::to_string(&sync_payload(&pc.data.lock().unwrap())).unwrap().contains("alerts"));
+        // restoring a backup keeps this device's alerts
+        let text = phone.export_backup();
+        pc.import_backup(&text, None).unwrap();
+        assert_eq!(pc.data.lock().unwrap().alerts.len(), 1);
+    }
+
+    // ------------------------------------------------------------- home-screen widget
+
+    #[test]
+    fn the_widget_file_is_written_only_when_turned_on() {
+        assert_eq!(grouped(1234567.8), "1,234,568");
+        assert_eq!(grouped(999.0), "999");
+        assert_eq!(grouped(-1500.0), "−1,500");
+        assert_eq!(grouped(0.2), "0");
+        // its own folder: the widget file has a fixed name next to the data file
+        let dir = std::env::temp_dir().join(format!("moneypi-widget-test-{}", random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = Arc::new(Core { path: dir.join("moneypi.json"), ..test_core() });
+        save(&c, cash("存款", 150500.0));
+        assert!(!c.widget_path().exists(), "off by default: nothing on the home screen");
+        dispatch(&c, "set_widget", json!({ "on": true }), false).unwrap();
+        save(&c, cash("另一筆", 1000.0));
+        let w: Value = serde_json::from_str(&std::fs::read_to_string(c.widget_path()).unwrap()).unwrap();
+        assert_eq!(w["enabled"], true);
+        assert_eq!(w["net"], "NT$ 151,500");
+        assert!(dispatch(&c, "set_widget", json!({ "on": true }), true).is_err(), "not from another device");
+        dispatch(&c, "set_widget", json!({ "on": false }), false).unwrap();
+        let w: Value = serde_json::from_str(&std::fs::read_to_string(c.widget_path()).unwrap()).unwrap();
+        assert_eq!(w, json!({ "enabled": false }), "turned off: the amount is gone from the file");
+        let mut d = Data::default();
+        d.snapshots = vec![Snapshot { date: "2026-11-13".into(), assets: 100.0, liabilities: 0.0 }, Snapshot { date: "2026-11-14".into(), assets: 0.0, liabilities: 0.0 }];
+        d.assets.push(Asset { id: 1, name: "x".into(), currency: "TWD".into(), value: 1300.0, ..Default::default() });
+        assert_eq!(widget_json(&d, "t")["change"], "較 11-13：+1,200");
     }
 
     #[test]

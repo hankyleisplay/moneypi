@@ -95,8 +95,10 @@ jobs:
           echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           npx tauri android init --ci
-          # the generated project ships Tauri's own launcher icon; replace it with MoneyPi's (made from src-tauri/icons/icon.png)
-          cp -r src-tauri/android-res/. src-tauri/gen/android/app/src/main/res/
+          # MoneyPi's own pieces on top of the generated project: launcher icons (made from src-tauri/icons/icon.png),
+          # the home-screen widget (Kotlin + resources + its <receiver>) and a MainActivity that refreshes it
+          node .github/scripts/android-extras.mjs
+          grep -q "NetWorthWidget" src-tauri/gen/android/app/src/main/AndroidManifest.xml || { echo "::error::widget receiver missing from the manifest"; exit 1; }
 
       # Tauri derives versionCode from major.minor.patch only, which would give a preview and its stable release the same code.
       # version.mjs makes it grow with every release and puts a stable release above its previews (see the comments there).

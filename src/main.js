@@ -756,7 +756,24 @@ function holdingHtml(a) {
     ${a.txs.length
       ? `<div class="tx-wrap"><table class="tx"><thead><tr><th>日期</th><th>類型</th><th class="r">單位</th><th class="r">單價</th><th class="r">手續費</th><th class="r">金額</th><th>備註</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
       : '<p class="muted">尚無交易記錄。記錄買入／賣出／配息後，數量、平均成本與損益會自動計算。已經持有很久？按「記錄交易」，把日期改成當初買進那天，就能用當時的價格算出真實損益。</p>'}
-  </div>${plansCard(a)}${a.market ? forecastCard(a) : ""}`;
+  </div>${plansCard(a)}${a.market && inTauri ? alertsCard(a) : ""}${a.market ? forecastCard(a) : ""}`;
+}
+
+// Price alerts of this device for one holding. Checked whenever quotes refresh (app open, or auto refresh on).
+let alertOp = "above";
+function alertsCard(a) {
+  const als = (data.alerts || []).filter((x) => x.asset === a.id);
+  const rows = als.map((x) => `<div class="al-row${x.fired ? " fired" : ""}"><span class="al-what">${x.op === "above" ? "漲到高於" : "跌到低於"} <b>${fmt.format(x.price)}</b> ${esc(a.currency)}</span>
+      <span class="al-state">${x.fired ? `🔔 已在 ${esc(x.fired.slice(5))} 通知` : "監看中"}</span>
+      <span class="btns">${x.fired ? `<button class="link" data-rearm="${x.id}">重新啟用</button>` : ""}<button class="link danger" data-delalert="${x.id}">刪除</button></span></div>`).join("");
+  return `<div class="glass detail" id="alert-card">
+    <div class="sect"><h3>到價通知 <span class="muted">(${als.length})</span></h3></div>
+    ${rows}
+    <div class="al-add"><div class="seg" id="al-op"><button type="button" data-op="above" class="${alertOp === "above" ? "on" : ""}">高於</button><button type="button" data-op="below" class="${alertOp === "below" ? "on" : ""}">低於</button></div>
+      <input id="al-price" type="number" min="0" step="any" inputmode="decimal" placeholder="${a.price > 0 ? `目前 ${fmt.format(a.price)}` : "價格"}">
+      <button type="button" class="primary" data-addalert>新增通知</button></div>
+    <p class="hint">每次更新股價時檢查（App 開著時；在「設定」開啟自動更新就會定時檢查）。到價會跳出系統通知，每個通知只響一次，可按「重新啟用」。App 完全關閉時不會檢查。這是這台裝置自己的設定，不會同步。</p>
+  </div>`;
 }
 
 function renderView() {
@@ -816,6 +833,19 @@ $("view-detail").onclick = async (e) => {
   const t = (sel) => e.target.closest(sel);
   try {
     if (t("[data-edit]")) openDialog(a);
+    else if (t("#al-op button")) { alertOp = t("#al-op button").dataset.op; [...$("al-op").children].forEach((b) => b.classList.toggle("on", b.dataset.op === alertOp)); }
+    else if (t("[data-addalert]")) {
+      const price = Number($("al-price").value);
+      if (!(price > 0)) return toast("請輸入大於 0 的價格");
+      data = await invoke("save_alert", { alert: { id: 0, asset: a.id, op: alertOp, price, fired: "" } });
+      render();
+      toast(alertOp === "above" ? `漲到 ${fmt.format(price)} 時會通知你` : `跌到 ${fmt.format(price)} 時會通知你`);
+    } else if (t("[data-rearm]")) {
+      const al = (data.alerts || []).find((x) => x.id === Number(t("[data-rearm]").dataset.rearm));
+      if (al) { data = await invoke("save_alert", { alert: { ...al, fired: "" } }); render(); toast("已重新啟用"); }
+    } else if (t("[data-delalert]")) {
+      data = await invoke("delete_alert", { id: Number(t("[data-delalert]").dataset.delalert) }); render(); toast("已刪除通知");
+    }
     else if (t("[data-addtx]")) openTx(a);
     else if (t("[data-sync]")) doRefresh(true);
     else if (t("[data-deltx]")) {
@@ -1372,6 +1402,15 @@ plform.onsubmit = async (e) => {
 };
 
 // Book whatever has come due (also backfills). Only the desktop app does this.
+// fixed income / expenses: every device books what is due (shared ids keep two devices from booking twice)
+async function runRecurring() {
+  if (!inTauri || !data.recurring?.length) return;
+  try {
+    const r = await invoke("run_recurring");
+    data = r.data;
+    if (r.added) { render(); toast(`固定收支已自動記入 ${r.added} 筆`); }
+  } catch {}
+}
 async function runPlans(announce) {
   if (!inTauri || !data.plans?.length) return;
   try {
@@ -1753,6 +1792,7 @@ $("refresh-seg").onclick = (e) => {
 
 function fillSettingsRates() {
   renderChannel();
+  if (isAndroid) { $("bio-lock").checked = !!data.app_lock; $("widget-on").checked = !!data.widget; }
   applyBaseLabels();
   $("base-now").textContent = curLabel(baseCur());
   $("rates").innerHTML = Object.entries(data.rates).map(([c, r]) => rateRow(c, r)).join("");
@@ -1881,6 +1921,7 @@ async function doRefresh(manual) {
   try {
     const r = await invoke("refresh_quotes");
     if (JSON.stringify(r.data) !== JSON.stringify(data)) { data = r.data; quietRender(); }
+    (r.alerts || []).forEach((h, i) => setTimeout(() => toast(`🔔 ${h.name} ${h.op === "above" ? "漲" : "跌"}到 ${fmt.format(h.price)}（已${h.op === "above" ? "高於" : "低於"} ${fmt.format(h.target)}）`), i * 3500));
     const msg = `已更新 ${r.updated} 檔報價、${r.rates} 個匯率` + (r.failed.length ? `；失敗：${r.failed.join("、")}` : "");
     if (manual || r.failed.length) toast(msg);
   } catch (err) {
@@ -2192,6 +2233,7 @@ function renderFlow() {
     : '<p class="muted">這個月還沒有支出記錄。</p>';
 
   renderBudgets(mf, m);
+  renderRecurring(m);
   renderFlowTrend();
 
   const q = (ui.fq || "").trim().toLowerCase();
@@ -2203,12 +2245,86 @@ function renderFlow() {
   $("flow-qsum").innerHTML = q && list.length ? `找到的合計：收入 <b class="pos ${m}">+${fmt0.format(sIn)}</b>、支出 <b class="neg ${m}">−${fmt0.format(sOut)}</b>` : "";
   $("flow-list").innerHTML = list.length
     ? list.map((f) => `<div class="frow"><span class="muted">${esc(q ? f.date : f.date.slice(5))}</span>
-        <span class="tag">${esc(f.category)}</span><span class="note-t">${esc(f.note)}</span>
+        <span class="tag">${esc(f.category)}</span><span class="note-t">${f.id >= 2 ** 52 ? '<span class="fixed-tag" title="固定收支自動記入">固定</span>' : ""}${esc(f.note)}</span>
         <span class="amt ${f.kind === "in" ? "pos" : "neg"} ${m}">${f.kind === "in" ? "+" : "−"}${fmt0.format(f.amount)}</span>
         <button class="link danger" data-delflow="${f.id}">刪除</button></div>`).join("")
     : q ? '<p class="muted">找不到符合的記錄。</p>' : '<p class="muted">沒有記錄，按右上角「記一筆」開始記帳。</p>';
 }
 let flowShown = [];
+
+// Fixed income / expenses: the rules with their next date; edit, pause or delete them.
+function nextRecDate(r) {
+  const today = todayStr();
+  if (r.end && r.end < today) return null;
+  let [y, mo] = (r.start > today ? r.start : today).slice(0, 7).split("-").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const last = new Date(y, mo, 0).getDate(), d = `${y}-${String(mo).padStart(2, "0")}-${String(Math.min(r.day, last)).padStart(2, "0")}`;
+    if (d >= r.start && d > today && (!r.end || d <= r.end)) return d;
+    if (++mo > 12) { mo = 1; y++; }
+  }
+  return null;
+}
+function renderRecurring(m) {
+  const rs = data.recurring || [];
+  if (!rs.length) { $("rec-list").innerHTML = '<p class="muted">薪水、房租、訂閱這類每月固定的收支，設定後會自動記帳。</p>'; return; }
+  const inc = rs.filter((r) => !r.paused && r.kind === "in").reduce((s, r) => s + r.amount, 0), out = rs.filter((r) => !r.paused && r.kind === "out").reduce((s, r) => s + r.amount, 0);
+  $("rec-list").innerHTML = [...rs].sort((a, b) => a.kind.localeCompare(b.kind) || a.day - b.day).map((r) => {
+    const nx = r.paused ? null : nextRecDate(r);
+    return `<div class="rec-row${r.paused ? " paused" : ""}"><span class="rec-day">每月 ${r.day} 日</span>
+      <span class="rec-what"><b>${esc(r.note || r.category)}</b><small class="muted">${esc(r.category)} · ${r.paused ? "已暫停" : nx ? `下次 ${nx.slice(5)}` : r.end && r.end < todayStr() ? "已結束" : "—"}</small></span>
+      <span class="amt ${r.kind === "in" ? "pos" : "neg"} ${m}">${r.kind === "in" ? "+" : "−"}${fmt0.format(r.amount)}</span>
+      <span class="rec-btns"><button type="button" class="link" data-redit="${r.id}">編輯</button><button type="button" class="link" data-rpause="${r.id}">${r.paused ? "恢復" : "暫停"}</button><button type="button" class="link danger" data-rdel="${r.id}">刪除</button></span></div>`;
+  }).join("") + `<p class="note">每月固定收入 <b class="pos ${m}">+${fmt0.format(inc)}</b>、固定支出 <b class="neg ${m}">−${fmt0.format(out)}</b></p>`;
+}
+const rdlg = $("rdlg"), rform = $("rform"), rCat = new Dropdown($("r-cat"));
+let recKind = "out", recEditing = null;
+function setRecKind(k, cat) {
+  recKind = k;
+  [...$("r-kind").children].forEach((b) => b.classList.toggle("on", b.dataset.k === k));
+  const used = (data.cashflow || []).filter((f) => f.kind === k).map((f) => f.category);
+  rCat.setOptions([...new Set([...FLOW_CATS[k], ...used, ...(cat ? [cat] : [])])], cat || (k === "in" ? "薪資" : "居住"));
+}
+$("r-kind").onclick = (e) => { const b = e.target.closest("button"); if (b) setRecKind(b.dataset.k); };
+function openRecurring(r) {
+  recEditing = r || null;
+  rform.reset();
+  $("rerr").textContent = "";
+  $("rdlg-title").textContent = r ? "編輯固定收支" : "新增固定收支";
+  setRecKind(r ? r.kind : "out", r && r.category);
+  rform.amount.value = r ? r.amount : "";
+  rform.note.value = r ? r.note : "";
+  rform.day.value = r ? r.day : new Date().getDate();
+  rform.start.value = r ? r.start : todayStr();
+  rform.end.value = r ? r.end : "";
+  rdlg.showModal();
+}
+$("rec-add").onclick = () => openRecurring(null);
+$("rec-list").onclick = async (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  const id = Number(b.dataset.redit || b.dataset.rpause || b.dataset.rdel), r = (data.recurring || []).find((x) => x.id === id);
+  if (!r) return;
+  try {
+    if (b.dataset.redit) return openRecurring(r);
+    if (b.dataset.rpause) { data = await invoke("save_recurring", { rule: { ...r, paused: !r.paused } }); render(); return toast(r.paused ? "已恢復" : "已暫停，不會再自動記帳"); }
+    if (await confirmBox(`刪除「${r.note || r.category}」這個固定收支？`, "已經自動記入的帳會保留，只是之後不再記。", "刪除")) {
+      data = await invoke("delete_recurring", { id }); render(); toast("已刪除");
+    }
+  } catch (err) { toast(String(err)); }
+};
+rform.onsubmit = async (e) => {
+  e.preventDefault();
+  const rule = { id: recEditing ? recEditing.id : 0, kind: recKind, category: rCat.value, amount: num(rform.amount.value), note: rform.note.value.trim(),
+    day: Math.round(Number(rform.day.value)), start: rform.start.value.trim(), end: rform.end.value.trim(), paused: recEditing ? recEditing.paused : false };
+  try {
+    const before = (data.cashflow || []).length;
+    data = await invoke("save_recurring", { rule });
+    rdlg.close();
+    render();
+    const added = (data.cashflow || []).length - before;
+    toast(added > 0 ? `已儲存，並補記了 ${added} 筆` : "已儲存");
+  } catch (err) { $("rerr").textContent = String(err); }
+};
 
 // Monthly budgets per expense category (shared with the paired device). The pace marker shows how much of the month is gone.
 function spentBy(ym) {
@@ -2887,6 +3003,62 @@ if (inTauri) {
   setInterval(() => { if (!document.hidden) syncPeer(false); }, 5 * 60000);
 }
 
+/* ---------- phone app lock (fingerprint / face / screen lock) ---------- */
+let unlocking = null, hiddenAt = 0;
+const bioMsg = (r) => r.code === "userCancel" || r.code === "systemCancel" ? "已取消。按「解鎖」再試一次。"
+  : r.code === "biometryLockout" ? "試太多次了，請稍後再試，或改用螢幕鎖密碼。"
+  : "沒有解鎖成功，按「解鎖」再試一次。";
+function showAppLock() { $("applock").hidden = false; document.body.classList.add("locked-app"); }
+// Resolves once unlocked. A phone without any screen lock (nothing to unlock with) is let in, so nobody gets locked out.
+function appUnlock() {
+  if (unlocking) return unlocking;
+  showAppLock();
+  unlocking = new Promise((done) => {
+    const attempt = async () => {
+      $("al-unlock").disabled = true;
+      $("al-msg").textContent = "驗證中…";
+      let r;
+      try { r = await invoke("bio_auth", { reason: "解鎖 MoneyPi" }); } catch (err) { r = { ok: false, code: "error", message: String(err) }; }
+      $("al-unlock").disabled = false;
+      if (r.ok || r.code === "passcodeNotSet" || r.code === "unsupported") {
+        if (!r.ok) toast("這支手機目前沒有螢幕鎖，App 鎖已略過");
+        $("applock").hidden = true; document.body.classList.remove("locked-app");
+        unlocking = null; hiddenAt = 0;
+        return done();
+      }
+      $("al-msg").textContent = bioMsg(r);
+    };
+    $("al-unlock").onclick = attempt;
+    attempt();
+  });
+  return unlocking;
+}
+document.addEventListener("visibilitychange", () => {
+  if (!isAndroid || !data.app_lock) return;
+  if (document.hidden) { if (!unlocking) hiddenAt = Date.now(); }
+  else if (hiddenAt && Date.now() - hiddenAt > 60000) appUnlock(); // away more than a minute: lock again
+});
+if (isAndroid) $("bio-lock").onchange = async (e) => {
+  const on = e.target.checked;
+  e.target.checked = !on; // only flips once it really worked
+  try {
+    if (on) {
+      const r = await invoke("bio_auth", { reason: "確認可以用這支手機的指紋或螢幕鎖解鎖 MoneyPi" });
+      if (!r.ok) return toast(r.code === "passcodeNotSet" ? "這支手機沒有設定螢幕鎖，無法開啟 App 鎖" : "驗證沒有成功，App 鎖沒有開啟");
+    }
+    data = await invoke("set_app_lock", { on });
+    $("bio-lock").checked = !!data.app_lock;
+    toast(on ? "已開啟 App 鎖" : "已關閉 App 鎖");
+  } catch (err) { toast(String(err)); }
+};
+
+if (isAndroid) $("widget-on").onchange = async (e) => {
+  try {
+    data = await invoke("set_widget", { on: e.target.checked });
+    toast(data.widget ? "已開啟：到手機桌面長按 →「小工具」加入 MoneyPi" : "已關閉，小工具不再顯示金額");
+  } catch (err) { e.target.checked = !e.target.checked; toast(String(err)); }
+};
+
 /* ---------- boot ---------- */
 document.querySelectorAll(".desk-only").forEach((el) => (el.hidden = !(inTauri && !isAndroid)));
 document.querySelectorAll(".peer-only").forEach((el) => (el.hidden = !inTauri));
@@ -2909,8 +3081,10 @@ async function boot() {
     await unlockFlow();
   }
   data = await invoke("get_data");
+  if (isAndroid && data.app_lock) showAppLock(); // before the page shows anything
   render();
   hideSplash();
+  if (isAndroid && data.app_lock) await appUnlock();
   let skipTour = false;
   if (inTauri && data.base_set === false) { // brand-new install: choose the main currency before anything else
     baseReady = baseFlow();
@@ -2921,8 +3095,8 @@ async function boot() {
   refreshPeer().then(() => syncPeer(false)); // on every start: is the bound device on? then sync
   scheduleRefresh();
   if (inTauri && data.refresh_sec > 0) doRefresh(false);
-  runPlans(false).then(() => runDividends(false));
-  setInterval(() => runPlans(false).then(() => runDividends(false)), 3600e3);
+  runPlans(false).then(() => runDividends(false)).then(runRecurring);
+  setInterval(() => runPlans(false).then(() => runDividends(false)).then(runRecurring), 3600e3);
   if (!skipTour && store.get(TOUR_KEY, "0") !== "1") setTimeout(startTour, 1200);
 }
 boot().catch((err) => { hideSplash(); toast(String(err)); });

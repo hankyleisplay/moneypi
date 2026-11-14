@@ -670,3 +670,38 @@ html[data-size=compact] .rrow,html[data-size=compact] .brow{grid-template-column
 html[data-size=compact] .brow{grid-template-areas:"n num" "t t" "left left"}
 html[data-size=compact] .rrow .ract,html[data-size=compact] .brow .bleft{text-align:left}
 html[data-size=compact] .rtrack,html[data-size=compact] .brow .btrack{margin:6px 0 4px}
+
+/* ---------- fixed income / expenses ---------- */
+.rec-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"d w a" "d w b";column-gap:12px;align-items:center;padding:8px 0}
+.rec-row+.rec-row{border-top:1px solid var(--line)}
+.rec-row.paused{opacity:.55}
+.rec-day{grid-area:d;font-size:12px;color:var(--muted);white-space:nowrap}
+.rec-what{grid-area:w;display:flex;flex-direction:column;min-width:0}
+.rec-what b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rec-what small{font-size:12px}
+.rec-row .amt{grid-area:a;text-align:right;font-variant-numeric:tabular-nums}
+.rec-btns{grid-area:b;display:flex;justify-content:flex-end;gap:2px}
+.rec-btns .link{font-size:12px;padding:2px 6px}
+.fixed-tag{display:inline-block;margin-right:6px;padding:0 7px;border-radius:999px;font-size:11px;color:var(--accent);background:rgba(47,107,255,.1);vertical-align:1px}
+html.dark .fixed-tag{background:rgba(122,162,255,.16)}
+
+/* ---------- price alerts ---------- */
+.al-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px;padding:7px 0;border-top:1px solid var(--line)}
+.al-row.fired .al-what{opacity:.6}
+.al-state{font-size:12px;color:var(--muted);white-space:nowrap}
+.al-add{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px;align-items:center;margin-top:10px}
+html[data-size=compact] .al-add{grid-template-columns:auto minmax(0,1fr)}
+html[data-size=compact] .al-add [data-addalert]{grid-column:1/-1}
+html[data-size=compact] .al-row{grid-template-columns:minmax(0,1fr) auto}
+html[data-size=compact] .al-row .al-state{grid-column:1}
+
+/* ---------- phone app lock ---------- */
+#applock{position:fixed;inset:0;z-index:60;display:grid;place-items:center;padding:24px;
+  background:radial-gradient(60vmax 60vmax at 20% 10%,rgba(158,194,255,.6),transparent 60%),radial-gradient(50vmax 50vmax at 85% 80%,rgba(217,184,255,.55),transparent 60%),#f4f6ff}
+html.dark #applock{background:radial-gradient(60vmax 60vmax at 20% 10%,rgba(59,109,255,.35),transparent 60%),radial-gradient(50vmax 50vmax at 85% 80%,rgba(155,77,255,.3),transparent 60%),#0a0e1d}
+.al-box{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;max-width:320px}
+.al-box h3{margin:6px 0 0;font-size:20px}
+.al-box p{margin:0}
+.al-box .primary{margin-top:8px;min-width:160px;height:46px}
+.al-icon{width:76px;height:76px;border-radius:24px;display:grid;place-items:center;color:#fff;background:linear-gradient(145deg,#6ea8ff,#8b5cf6);box-shadow:0 12px 30px rgba(80,95,255,.35)}
+body.locked-app .app{visibility:hidden}

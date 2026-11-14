@@ -17,6 +17,14 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div id="applock" hidden role="dialog" aria-modal="true" aria-labelledby="al-title">
+  <div class="al-box">
+    <div class="al-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="38" height="38" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/><circle cx="12" cy="15.5" r="1.3"/></svg></div>
+    <h3 id="al-title">MoneyPi 已上鎖</h3>
+    <p class="muted" id="al-msg">用指紋、臉部或螢幕鎖解鎖。</p>
+    <button type="button" class="primary" id="al-unlock">解鎖</button>
+  </div>
+</div>
 <div id="splash" aria-hidden="true">
   <div class="sp-core"><i class="sp-ring"></i><i class="sp-ring r2"></i><img class="sp-logo" src="icon-192.png" alt="" width="84" height="84"></div>
   <b class="sp-name">MoneyPi</b>
@@ -233,6 +241,10 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
         <div id="budget-list"></div>
       </div>
       <div class="glass panel">
+        <div class="panel-head"><h3>固定收支</h3><button type="button" id="rec-add">＋ 新增</button></div>
+        <div id="rec-list"></div>
+      </div>
+      <div class="glass panel">
         <div class="panel-head"><h3>近 12 個月收支</h3><span class="ft-legend"><i class="in"></i>收入 <i class="out"></i>支出</span></div>
         <div class="ftrend" id="flow-trend"></div>
         <p class="hint">點一個月份可以切換到那個月。</p>
@@ -349,6 +361,16 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
       <p><b>財務自由試算：</b>在「月報」最下面。用每月生活費、每月可存、預期報酬率與提領率，估算需要多少錢、大約何時達成；空白欄位會用你的記帳資料自動帶入。</p>
       <p><b>記帳的小幫手：</b>近 12 個月收支圖（點月份可切換）、搜尋所有月份的備註與類別、把目前的明細匯出成 CSV；「記一筆」會列出你常記的項目，點一下就填好。</p>
       <p><b>深色模式：</b>「設定 → 外觀」可選自動（跟系統）、淺色或深色。這是每台裝置自己的設定；預算與目標配置則會跟綁定的裝置同步。</p>
+    </details>
+
+    <details class="help"><summary>固定收支、到價通知</summary>
+      <p><b>固定收支：</b>到「記帳」的「固定收支」按「＋ 新增」，設定薪水、房租、訂閱等每月固定的金額與日期，到了那天會自動記帳（兩台裝置都會記，但不會重複）；自動記入的帳刪掉後不會再補回來。</p>
+      <p class="peer-only" hidden><b>到價通知：</b>點進有行情代號的股票或 ETF，在「到價通知」設定漲到或跌到某個價格；更新股價時到價就會跳通知。App 完全關閉時不會檢查，想要定時檢查請在「設定」開啟股價自動更新。</p>
+    </details>
+
+    <details class="help droid-only" hidden><summary>App 鎖與桌面小工具</summary>
+      <p><b>App 鎖：</b>「設定 → App 鎖」開啟後，打開 App 或離開超過 1 分鐘再回來時，要用指紋、臉部或螢幕鎖解鎖。手機若沒有任何螢幕鎖，App 鎖會自動略過，不會把你鎖在外面。</p>
+      <p><b>桌面小工具：</b>「設定 → 桌面小工具」開啟後，長按手機桌面 →「小工具」→ 找到 MoneyPi 拖到桌面。桌面上的金額別人也看得到，不想顯示時關掉即可。</p>
     </details>
 
     <details class="help peer-only" hidden><summary>更新與「預覽版」頻道</summary>
@@ -574,6 +596,18 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
       <div class="btns"><button type="button" id="bk-now">立即備份</button><button type="button" id="bk-open">開啟備份資料夾</button></div>
     </div>
 
+    <div class="droid-only" hidden>
+      <h4>App 鎖</h4>
+      <label class="chk"><input id="bio-lock" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>開啟 App 時要用指紋、臉部或螢幕鎖解鎖</span></label>
+      <p class="hint">開啟時會先驗證一次，確定這支手機可以解鎖才會啟用。離開 App 超過 1 分鐘再回來也要解鎖。如果之後手機取消了螢幕鎖，App 鎖會自動略過，不會把你鎖在外面。這只擋住畫面，手機裡的資料檔沒有另外加密。</p>
+    </div>
+
+    <div class="droid-only" hidden>
+      <h4>桌面小工具</h4>
+      <label class="chk"><input id="widget-on" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>讓桌面小工具顯示淨資產</span></label>
+      <p class="hint">開啟後，長按手機桌面 →「小工具」→ 找到 MoneyPi 拖到桌面。小工具會在你離開 App 時更新，平常約每 30 分鐘更新一次；點它會打開 MoneyPi。注意：桌面上的金額別人也看得到，關閉後小工具就不再顯示金額。</p>
+    </div>
+
     <h4>備份與還原</h4>
     <div class="row"><span class="muted">完整備份（JSON）</span><div class="btns"><button type="button" id="backup-btn">匯出備份</button><button type="button" id="restore-btn">還原備份</button></div></div>
     <input type="file" id="restore-file" accept=".json,application/json" hidden>
@@ -680,6 +714,27 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
     <p id="base-err" class="neg"></p>
     <menu><button type="button" id="base-cancel" hidden>取消</button><button type="submit" class="primary" id="base-ok">開始使用</button></menu>
     <button type="button" class="link droid-only" id="base-connect" hidden>已經有電腦版？先去連線，幣別會跟電腦一致</button>
+  </form>
+</dialog>
+
+<dialog id="rdlg" class="glass">
+  <form method="dialog" id="rform">
+    <h3 id="rdlg-title">新增固定收支</h3>
+    <p class="hint">薪水、房租、訂閱這類每個月都一樣的收支，設定一次，到了那天會自動記進記帳（兩台裝置都會記，但不會重複）。自動記的那筆刪掉後不會再補回來。</p>
+    <div class="seg" id="r-kind"><button type="button" data-k="out" class="on">支出</button><button type="button" data-k="in">收入</button></div>
+    <div class="two">
+      <label>金額（<span class="b-sym">NT$</span>）<input name="amount" type="number" min="0" step="any" inputmode="decimal" required></label>
+      <div class="field">類別<div class="dd" id="r-cat"></div></div>
+    </div>
+    <label>名稱／備註<input name="note" maxlength="60" placeholder="例如 房租、Netflix、薪水" autocomplete="off"></label>
+    <div class="two">
+      <label>每月幾號<input name="day" type="number" min="1" max="31" step="1" inputmode="numeric" required></label>
+      <label>開始日期<input name="start" placeholder="YYYY-MM-DD" required autocomplete="off"></label>
+    </div>
+    <label>結束日期（選填）<input name="end" placeholder="YYYY-MM-DD，留空表示一直持續" autocomplete="off"></label>
+    <p class="hint">選 29–31 號時，較短的月份會記在月底。開始日期在過去的話，從那之後到今天的每個月都會補記。</p>
+    <p id="rerr" class="neg"></p>
+    <menu><button type="button" data-close>取消</button><button type="submit" class="primary">儲存</button></menu>
   </form>
 </dialog>
 
