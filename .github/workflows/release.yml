@@ -219,29 +219,39 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       VERSION: ${{ needs.prepare.outputs.version }}
       PRE: ${{ needs.prepare.outputs.pre }}
+      # Everything below goes through the release id: a draft has no tag yet, so `gh release ... v<version>` cannot find it.
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
     steps:
       - uses: actions/checkout@v5
 
       - name: Check that nothing is missing and write latest.json for every platform
         run: |
           set -euo pipefail
-          gh release view "v$VERSION" --json assets > "$RUNNER_TEMP/assets.json"
+          R="repos/$GITHUB_REPOSITORY/releases"
+          gh api "$R/$RELEASE_ID/assets?per_page=100" > "$RUNNER_TEMP/list.json"
+          node -e 'const l=require(process.argv[1]); require("fs").writeFileSync(process.argv[2], JSON.stringify({assets: l}))' \
+            "$RUNNER_TEMP/list.json" "$RUNNER_TEMP/assets.json"
           mkdir -p "$RUNNER_TEMP/sigs"
-          gh release download "v$VERSION" --pattern "*.sig" --dir "$RUNNER_TEMP/sigs" --clobber
+          jq -r '.[] | select(.name | endswith(".sig")) | "\(.id) \(.name)"' "$RUNNER_TEMP/list.json" | while read -r aid name; do
+            gh api -H "Accept: application/octet-stream" "$R/assets/$aid" > "$RUNNER_TEMP/sigs/$name"
+          done
+          ls -l "$RUNNER_TEMP/sigs"
           node .github/scripts/release-body.mjs "$VERSION" "release-notes/v$VERSION.md" "$RUNNER_TEMP"
           node .github/scripts/updater-json.mjs "$VERSION" "$RUNNER_TEMP/update-notes.md" "$RUNNER_TEMP/assets.json" "$RUNNER_TEMP/sigs" "$RUNNER_TEMP/latest.json" "$GITHUB_REPOSITORY"
-          gh release upload "v$VERSION" "$RUNNER_TEMP/latest.json" --clobber
-          gh release view "v$VERSION" --json assets -q '.assets[].name'
+          # replace a latest.json left by an earlier attempt, then upload this one
+          jq -r '.[] | select(.name == "latest.json") | .id' "$RUNNER_TEMP/list.json" | while read -r aid; do gh api -X DELETE "$R/assets/$aid"; done
+          gh api -X POST "https://uploads.github.com/$R/$RELEASE_ID/assets?name=latest.json" \
+            -H "Content-Type: application/json" --input "$RUNNER_TEMP/latest.json" --jq '"uploaded \(.name) (\(.size) bytes)"'
+          gh api "$R/$RELEASE_ID/assets?per_page=100" --jq '.[].name'
 
       - name: Write the notes and publish
         run: |
           set -euo pipefail
-          if [ "$PRE" = "true" ]; then
-            # a preview is a pre-release and never "the latest release" (that is what stable users and the stable updater follow)
-            gh release edit "v$VERSION" --title "MoneyPi v$VERSION (preview)" --notes-file "$RUNNER_TEMP/release-body.md" --draft=false --prerelease --latest=false
-          else
-            gh release edit "v$VERSION" --title "MoneyPi v$VERSION" --notes-file "$RUNNER_TEMP/release-body.md" --draft=false --prerelease=false --latest
-          fi
+          # a preview is a pre-release and never "the latest release" (that is what stable users and the stable updater follow)
+          if [ "$PRE" = "true" ]; then title="MoneyPi v$VERSION (preview)"; latest=false; else title="MoneyPi v$VERSION"; latest=true; fi
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -f tag_name="v$VERSION" -f name="$title" \
+            -F body=@"$RUNNER_TEMP/release-body.md" -F draft=false -F prerelease="$PRE" -f make_latest="$latest" \
+            --jq '"published \(.tag_name): draft=\(.draft) prerelease=\(.prerelease) \(.html_url)"'
 
       # The preview feed: one fixed release ("preview-channel") whose latest.json always describes the newest build (preview or
       # stable), because GitHub has no "latest including pre-releases" address. Required for a preview; for a stable release it
@@ -252,7 +262,7 @@ jobs:
           set -euo pipefail
           FEED=preview-channel
           mkdir -p "$RUNNER_TEMP/feed-new" "$RUNNER_TEMP/feed-cur"
-          gh release download "v$VERSION" --pattern latest.json --dir "$RUNNER_TEMP/feed-new" --clobber
+          cp "$RUNNER_TEMP/latest.json" "$RUNNER_TEMP/feed-new/latest.json"
           if ! gh release view "$FEED" >/dev/null 2>&1; then
             gh release create "$FEED" --prerelease --latest=false --target "$GITHUB_SHA" --title "Preview channel (update feed only)" \
               --notes "Not a download. This release only holds latest.json, which the app's preview update channel reads. Get MoneyPi from the versioned releases."
