@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_title">MoneyPi 淨資產</string>
+    <string name="widget_description">在桌面顯示淨資產（需先在 MoneyPi 設定裡開啟）</string>
+</resources>

@@ -5,7 +5,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::UdpSocket,
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{mpsc, Arc, Mutex},
@@ -160,6 +160,43 @@ struct Plan {
     status: String,
 }
 
+/// A fixed income or expense (salary, rent, a subscription) that books itself into the ledger every month on `day`
+/// (the last day for short months). Every device books it, under an id made from the rule and the date, so two devices
+/// end up with the very same entry instead of two, and an entry the user deleted stays deleted (its tombstone remains).
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+struct Recurring {
+    #[serde(default)]
+    id: u64,
+    /// "in" | "out"
+    kind: String,
+    category: String,
+    amount: f64,
+    #[serde(default)]
+    note: String,
+    day: u32,
+    start: String,
+    /// Empty = no end.
+    #[serde(default)]
+    end: String,
+    #[serde(default)]
+    paused: bool,
+}
+
+/// "Tell me when this holding's price goes above / below X" (in the holding's own currency). A device setting: each
+/// device notifies for its own alerts while the app runs; never synced. One-shot: `fired` holds when it triggered.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+struct Alert {
+    #[serde(default)]
+    id: u64,
+    asset: u64,
+    /// "above" | "below"
+    op: String,
+    price: f64,
+    /// "YYYY-MM-DD HH:MM" when it triggered; empty = still watching
+    #[serde(default)]
+    fired: String,
+}
+
 /// One income/expense entry of the bookkeeping ledger (in the base currency).
 #[derive(Serialize, Deserialize, Clone, Default)]
 struct Flow {
@@ -218,6 +255,21 @@ struct Data {
     plans: Vec<Plan>,
     #[serde(default)]
     next_plan: u64,
+    #[serde(default)]
+    recurring: Vec<Recurring>,
+    #[serde(default)]
+    next_rec: u64,
+    /// Price alerts of this device (never synced, kept when a backup is restored).
+    #[serde(default)]
+    alerts: Vec<Alert>,
+    /// Phone app lock: ask for the fingerprint / face / screen lock when the app opens (a device setting).
+    #[serde(default)]
+    app_lock: bool,
+    /// Home-screen widget shows the net worth (opt-in, a device setting): every save also writes moneypi-widget.json.
+    #[serde(default)]
+    widget: bool,
+    #[serde(default)]
+    next_alert: u64,
     /// Daily copy of the data file (encrypted too, when a password is set).
     #[serde(default)]
     backup_on: bool,
@@ -253,9 +305,25 @@ struct Data {
     /// A device setting: never synced and kept when a backup is restored.
     #[serde(default = "default_channel")]
     channel: String,
+    #[serde(default)]
+    prefs: Prefs,
     /// false only on a brand-new install, until the user has picked `base` (old data files count as picked: they are TWD).
     #[serde(default = "yes")]
     base_set: bool,
+}
+
+/// Settings that belong to the books rather than to one device, so paired devices share them: monthly budgets per expense
+/// category (in the base currency) and the target allocation per asset category (percent). When two devices sync, the side
+/// that changed them last wins as a whole.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+struct Prefs {
+    #[serde(default)]
+    budgets: BTreeMap<String, f64>,
+    #[serde(default)]
+    alloc: BTreeMap<String, f64>,
+    /// ms since epoch of the last change; 0 = never set
+    #[serde(default)]
+    at: u64,
 }
 
 /// The device this one syncs with: where to reach it and the PIN it expects.
@@ -334,6 +402,12 @@ impl Default for Data {
             next_flow: 0,
             plans: vec![],
             next_plan: 0,
+            recurring: vec![],
+            next_rec: 0,
+            alerts: vec![],
+            next_alert: 0,
+            app_lock: false,
+            widget: false,
             backup_on: false,
             backup_dir: String::new(),
             backup_keep: default_keep(),
@@ -345,6 +419,7 @@ impl Default for Data {
             install_id: String::new(),
             base: base_currency(),
             channel: default_channel(),
+            prefs: Prefs::default(),
             base_set: false,
         }
     }
@@ -492,6 +567,9 @@ fn stamp(d: &mut Data, now: u64) {
     for p in &d.plans {
         live.insert(format!("p:{}", p.id), json_digest(p));
     }
+    for r in &d.recurring {
+        live.insert(format!("r:{}", r.id), json_digest(r));
+    }
     for (k, h) in &live {
         match d.stamps.get(k) {
             Some(s) if !s.del && s.h == *h => {}
@@ -518,6 +596,9 @@ struct SyncPayload {
     cashflow: Vec<Flow>,
     #[serde(default)]
     plans: Vec<Plan>,
+    /// Absent from older versions: then there is simply nothing to merge (they never send "r:" stamps either).
+    #[serde(default)]
+    recurring: Vec<Recurring>,
     #[serde(default)]
     snapshots: Vec<Snapshot>,
     #[serde(default)]
@@ -530,11 +611,14 @@ struct SyncPayload {
     /// The sender is a brand-new install that has not picked its main currency yet (it adopts the other side's).
     #[serde(default)]
     fresh: bool,
+    /// Shared budgets / allocation targets; absent from older versions, which then leave ours alone.
+    #[serde(default)]
+    prefs: Option<Prefs>,
 }
 
 /// A brand-new install: no currency chosen yet and nothing entered.
 fn is_fresh(d: &Data) -> bool {
-    !d.base_set && d.assets.is_empty() && d.cashflow.is_empty() && d.goals.is_empty() && d.plans.is_empty()
+    !d.base_set && d.assets.is_empty() && d.cashflow.is_empty() && d.goals.is_empty() && d.plans.is_empty() && d.recurring.is_empty()
 }
 
 fn sync_payload(d: &Data) -> SyncPayload {
@@ -543,11 +627,13 @@ fn sync_payload(d: &Data) -> SyncPayload {
         goals: d.goals.clone(),
         cashflow: d.cashflow.clone(),
         plans: d.plans.clone(),
+        recurring: d.recurring.clone(),
         snapshots: d.snapshots.clone(),
         rates: d.rates.clone(),
         stamps: d.stamps.clone(),
         base: d.base.clone(),
         fresh: is_fresh(d),
+        prefs: Some(d.prefs.clone()),
     }
 }
 
@@ -637,9 +723,15 @@ fn merge_payload(d: &mut Data, remote: &SyncPayload, now: u64, base: u64) -> usi
     merge_records(&mut d.goals, &remote.goals, |g| g.id, "g:", &mut stamps, &remote.stamps, None);
     merge_records(&mut d.cashflow, &remote.cashflow, |f| f.id, "f:", &mut stamps, &remote.stamps, None);
     merge_records(&mut d.plans, &remote.plans, |p| p.id, "p:", &mut stamps, &remote.stamps, None);
+    merge_records(&mut d.recurring, &remote.recurring, |r| r.id, "r:", &mut stamps, &remote.stamps, None);
     d.stamps = stamps;
     let changed = d.stamps.iter().filter(|(k, v)| before.get(*k) != Some(*v)).count();
     add_missing_snapshots(&mut d.snapshots, remote.snapshots.clone(), "9999-12-31");
+    let mut changed = changed;
+    if let Some(p) = remote.prefs.as_ref().filter(|p| p.at > d.prefs.at) {
+        d.prefs = p.clone();
+        changed += 1;
+    }
     for (c, r) in &remote.rates {
         d.rates.entry(c.clone()).or_insert(*r);
     }
@@ -885,6 +977,156 @@ fn due_dates(p: &Plan, today: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
     out
 }
 
+/// The day of a month a monthly schedule falls on: `day`, or the month's last day when it is shorter.
+fn month_day(y: i32, m: u32, day: u32) -> chrono::NaiveDate {
+    let mut d = day.clamp(1, 31);
+    loop {
+        if let Some(x) = chrono::NaiveDate::from_ymd_opt(y, m, d) {
+            return x;
+        }
+        d -= 1;
+    }
+}
+
+/// Dates a fixed income/expense is due on, from its start up to `today` (and its end), at most the last 120.
+fn recurring_dates(r: &Recurring, today: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
+    use chrono::Datelike;
+    let Ok(start) = chrono::NaiveDate::parse_from_str(&r.start, "%Y-%m-%d") else { return vec![] };
+    let end = chrono::NaiveDate::parse_from_str(&r.end, "%Y-%m-%d").unwrap_or(today).min(today);
+    let (mut y, mut m) = (start.year(), start.month());
+    let mut out = vec![];
+    loop {
+        let date = month_day(y, m, r.day);
+        if date > end {
+            break;
+        }
+        if date >= start {
+            out.push(date);
+        }
+        if m == 12 { y += 1; m = 1 } else { m += 1 }
+    }
+    let skip = out.len().saturating_sub(120);
+    out.split_off(skip)
+}
+
+/// Id of the ledger entry a fixed income/expense books on `date`: the same on every device. Bit 52 keeps it apart from
+/// the ids devices hand out (below 2^48) and the value stays below 2^53, exact in JavaScript.
+fn recurring_entry_id(rule: u64, date: &str) -> u64 {
+    (1u64 << 52) | (fnv(format!("{rule}|{date}").as_bytes()) & ((1u64 << 52) - 1))
+}
+
+fn validate_recurring(r: &Recurring) -> Result<(), String> {
+    if !matches!(r.kind.as_str(), "in" | "out") {
+        return Err("未知的收支類型".into());
+    }
+    if !r.amount.is_finite() || r.amount <= 0.0 {
+        return Err("金額必須大於 0".into());
+    }
+    if r.category.trim().is_empty() || r.category.chars().count() > 20 {
+        return Err("請選擇類別".into());
+    }
+    if r.note.chars().count() > 60 {
+        return Err("備註太長了".into());
+    }
+    if !(1..=31).contains(&r.day) {
+        return Err("每月幾號需為 1–31".into());
+    }
+    if !valid_date(&r.start) {
+        return Err("開始日期格式需為 YYYY-MM-DD".into());
+    }
+    if !r.end.is_empty() && (!valid_date(&r.end) || r.end < r.start) {
+        return Err("結束日期需為 YYYY-MM-DD，且不早於開始日期".into());
+    }
+    Ok(())
+}
+
+/// Book every due, not yet booked (or deleted) entry of every active fixed income/expense. Returns how many were added.
+fn book_recurring(d: &mut Data, today: chrono::NaiveDate) -> usize {
+    let mut added = 0;
+    for r in d.recurring.clone() {
+        if r.paused {
+            continue;
+        }
+        for date in recurring_dates(&r, today) {
+            let ds = date.format("%Y-%m-%d").to_string();
+            let id = recurring_entry_id(r.id, &ds);
+            // already there, or there once and deleted by the user (a tombstone): leave it
+            if d.cashflow.iter().any(|f| f.id == id) || d.stamps.contains_key(&format!("f:{id}")) {
+                continue;
+            }
+            let note = if r.note.trim().is_empty() { "固定收支".to_string() } else { r.note.clone() };
+            d.cashflow.push(Flow { id, date: ds, kind: r.kind.clone(), category: r.category.clone(), amount: r.amount, note });
+            added += 1;
+        }
+    }
+    added
+}
+
+/// Fire every watching alert whose holding's current price crossed its line. Returns what fired, for the notification.
+fn check_alerts(d: &mut Data, now: &str) -> Vec<Value> {
+    let mut hits = vec![];
+    let assets = d.assets.clone();
+    for al in d.alerts.iter_mut().filter(|a| a.fired.is_empty()) {
+        let Some(a) = assets.iter().find(|a| a.id == al.asset) else { continue };
+        if a.price <= 0.0 {
+            continue;
+        }
+        let hit = if al.op == "above" { a.price >= al.price } else { a.price <= al.price };
+        if hit {
+            al.fired = now.to_string();
+            hits.push(json!({ "id": al.id, "name": a.name, "symbol": a.symbol, "op": al.op, "target": al.price, "price": a.price, "currency": a.currency }));
+        }
+    }
+    hits
+}
+
+fn alert_text(h: &Value) -> (String, String) {
+    let name = h["name"].as_str().unwrap_or("");
+    let up = h["op"] == "above";
+    let title = format!("{name} {}到價", if up { "漲" } else { "跌" });
+    let body = format!(
+        "現價 {} {}，已{} 你設的 {}",
+        h["price"].as_f64().map(|p| format!("{}", r4(p))).unwrap_or_default(),
+        h["currency"].as_str().unwrap_or(""),
+        if up { "高於" } else { "低於" },
+        h["target"].as_f64().map(|p| format!("{}", r4(p))).unwrap_or_default()
+    );
+    (title, body)
+}
+
+/// "1234567.8" -> "1,234,568" (whole units, like the app shows totals).
+fn grouped(v: f64) -> String {
+    let n = v.abs().round() as u64;
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if v < 0.0 && n > 0 { format!("−{out}") } else { out }
+}
+
+fn currency_symbol(code: &str) -> String {
+    match code {
+        "TWD" => "NT$", "USD" => "US$", "JPY" => "¥", "CNY" => "CN¥", "EUR" => "€", "GBP" => "£", "HKD" => "HK$", "KRW" => "₩",
+        "AUD" => "A$", "CAD" => "C$", "SGD" => "S$", "NZD" => "NZ$", "THB" => "฿", "MYR" => "RM", "VND" => "₫", "PHP" => "₱", "INR" => "₹",
+        other => other,
+    }
+    .to_string()
+}
+
+/// What the home-screen widget shows: the net worth now and the change since the previous day with a snapshot.
+fn widget_json(d: &Data, updated: &str) -> Value {
+    let net: f64 = d.assets.iter().map(|a| if a.liability { -in_base(d, a) } else { in_base(d, a) }).sum();
+    let change = d.snapshots.len().checked_sub(2).and_then(|i| d.snapshots.get(i)).map(|p| {
+        let diff = net - (p.assets - p.liabilities);
+        format!("較 {}：{}{}", p.date.get(5..).unwrap_or(&p.date), if diff >= 0.0 { "+" } else { "−" }, grouped(diff.abs()))
+    });
+    json!({ "enabled": true, "net": format!("{} {}", currency_symbol(&d.base), grouped(net)), "change": change.unwrap_or_default(), "updated": updated })
+}
+
 fn validate_tx(t: &Tx) -> Result<(), String> {
     if !valid_date(&t.date) {
         return Err("日期格式需為 YYYY-MM-DD".into());
@@ -1053,7 +1295,51 @@ fn extract_tunnel_url(line: &str) -> Option<String> {
     (host.ends_with(".trycloudflare.com") && !host.starts_with("api.")).then_some(url)
 }
 
-const CLOUDFLARED_ASSET: &str = "cloudflared-windows-amd64.exe";
+/// The computer's own name, shown on the paired device: Windows COMPUTERNAME, the Mac's "Computer Name", Linux hostname.
+fn computer_name() -> Option<String> {
+    let clean = |s: String| Some(s.trim().to_string()).filter(|s| !s.is_empty());
+    if let Some(n) = std::env::var("COMPUTERNAME").ok().and_then(clean) {
+        return Some(n);
+    }
+    if cfg!(target_os = "macos") {
+        if let Some(n) = Command::new("scutil").args(["--get", "ComputerName"]).output().ok().and_then(|o| clean(String::from_utf8_lossy(&o.stdout).into())) {
+            return Some(n);
+        }
+    }
+    std::env::var("HOSTNAME").ok().and_then(clean).or_else(|| fs::read_to_string("/etc/hostname").ok().and_then(clean))
+}
+
+/// cloudflared's file name on this computer.
+const CF_EXE: &str = if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" };
+
+/// The official cloudflared download for this computer: the release asset name, and whether it is a .tgz (macOS)
+/// that holds the program instead of being the program itself.
+fn cloudflared_asset() -> Option<(&'static str, bool)> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", _) => Some(("cloudflared-windows-amd64.exe", false)),
+        ("linux", "x86_64") => Some(("cloudflared-linux-amd64", false)),
+        ("linux", "aarch64") => Some(("cloudflared-linux-arm64", false)),
+        ("macos", "x86_64") => Some(("cloudflared-darwin-amd64.tgz", true)),
+        ("macos", "aarch64") => Some(("cloudflared-darwin-arm64.tgz", true)),
+        _ => None,
+    }
+}
+
+/// A file called `name` anywhere under `dir` (the macOS archive's layout is not documented, so it is searched).
+fn find_file_named(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        if p.is_file() && p.file_name().is_some_and(|n| n == name) {
+            return Some(p);
+        }
+        if p.is_dir() && depth > 0 {
+            if let Some(f) = find_file_named(&p, name, depth - 1) {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
 const CLOUDFLARED_RELEASES: &str = "https://api.github.com/repos/cloudflare/cloudflared/releases/latest";
 
 /// Download the official cloudflared build and install it only if it matches the SHA-256
@@ -1068,10 +1354,11 @@ fn download_cloudflared(dest: &Path, report: &dyn Fn(&str, u64, u64)) -> Result<
         .map_err(|e| format!("無法取得版本資訊：{e}"))?
         .into_json()
         .map_err(|e| format!("版本資訊格式錯誤：{e}"))?;
+    let (asset_name, packed) = cloudflared_asset().ok_or("這種電腦沒有官方的 cloudflared 版本")?;
     let asset = rel["assets"]
         .as_array()
-        .and_then(|a| a.iter().find(|x| x["name"] == CLOUDFLARED_ASSET))
-        .ok_or("找不到 Windows 版安裝檔")?;
+        .and_then(|a| a.iter().find(|x| x["name"] == asset_name))
+        .ok_or_else(|| format!("找不到官方的 {asset_name}"))?;
     let url = asset["browser_download_url"].as_str().ok_or("找不到下載網址")?;
     if !url.starts_with("https://github.com/cloudflare/cloudflared/releases/download/") {
         return Err("下載網址不在預期的官方來源，已中止".into());
@@ -1093,7 +1380,7 @@ fn download_cloudflared(dest: &Path, report: &dyn Fn(&str, u64, u64)) -> Result<
         .or_else(|| asset["size"].as_u64())
         .unwrap_or(0);
     let mut reader = resp.into_reader();
-    let part = dest.with_extension("exe.part");
+    let part = dest.with_extension("part");
     let result = (|| -> Result<String, String> {
         let mut f = fs::File::create(&part).map_err(|e| e.to_string())?;
         let (mut hasher, mut buf) = (Sha256::new(), vec![0u8; 64 * 1024]);
@@ -1129,7 +1416,29 @@ fn download_cloudflared(dest: &Path, report: &dyn Fn(&str, u64, u64)) -> Result<
         return Err("下載檔案的校驗碼不符，已中止（檔案可能損毀或被竄改）".into());
     }
     report("安裝中…", 1, 1);
-    fs::rename(&part, dest).map_err(|e| e.to_string())
+    if packed {
+        // macOS: the verified .tgz holds the program; unpack it with the system's tar and take the file out
+        let tmp = dest.with_extension("unpack");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+        let ok = Command::new("tar").arg("-xzf").arg(&part).arg("-C").arg(&tmp).status().map(|s| s.success()).unwrap_or(false);
+        let _ = fs::remove_file(&part);
+        let found = if ok { find_file_named(&tmp, "cloudflared", 3) } else { None };
+        let res = match found {
+            Some(f) => fs::rename(&f, dest).map_err(|e| e.to_string()),
+            None => Err("解壓縮後找不到 cloudflared".into()),
+        };
+        let _ = fs::remove_dir_all(&tmp);
+        res?;
+    } else {
+        fs::rename(&part, dest).map_err(|e| e.to_string())?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dest, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// winget (App Installer) ships with current Windows 10/11 but not every machine has it.
@@ -1324,8 +1633,39 @@ impl Core {
         let tmp = self.path.with_extension("json.tmp");
         fs::write(&tmp, out).map_err(|e| e.to_string())?;
         fs::rename(&tmp, &self.path).map_err(|e| e.to_string())?;
+        if d.widget {
+            let _ = fs::write(self.widget_path(), widget_json(d, &chrono::Local::now().format("%m/%d %H:%M").to_string()).to_string());
+        }
         self.bump();
         Ok(())
+    }
+
+    /// Read by the Android home-screen widget (NetWorthWidget.kt looks for it next to the data file).
+    fn widget_path(&self) -> PathBuf {
+        self.path.with_file_name("moneypi-widget.json")
+    }
+
+    /// Why the app stopped last time, if it crashed (written by MoneyPiApp.kt on Android, or the panic hook), once:
+    /// the report is removed when read.
+    fn take_crash(&self) -> Value {
+        let f = crash_path(&self.path);
+        match fs::read_to_string(&f) {
+            Ok(t) => {
+                let _ = fs::remove_file(&f);
+                json!(t.trim())
+            }
+            Err(_) => Value::Null,
+        }
+    }
+
+    fn set_widget(&self, on: bool) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.widget = on;
+        self.persist(&mut d)?;
+        if !on {
+            let _ = fs::write(self.widget_path(), json!({ "enabled": false }).to_string()); // the widget then says how to turn it on
+        }
+        Ok(view(&d))
     }
 
     fn is_locked(&self) -> bool {
@@ -1484,15 +1824,14 @@ impl Core {
                 "count": files.len(), "files": files.into_iter().take(5).collect::<Vec<_>>() })
     }
 
-    fn open_backups(&self) -> Result<(), String> {
+    /// The backup folder, created if needed (the window opens it with the system file manager).
+    fn backup_dir_ready(&self) -> Result<PathBuf, String> {
         let dir = {
             let d = self.data.lock().unwrap();
             self.backup_path(&d)
         };
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let mut c = Command::new("explorer");
-        c.arg(&dir);
-        c.spawn().map(|_| ()).map_err(|e| e.to_string())
+        Ok(dir)
     }
 
     fn save_goal(&self, mut g: Goal) -> Result<Value, String> {
@@ -1556,6 +1895,83 @@ impl Core {
         Ok(view(&d))
     }
 
+    /// Add or change a price alert (saving one again with an empty `fired` re-arms it).
+    fn save_alert(&self, mut al: Alert) -> Result<Value, String> {
+        if !matches!(al.op.as_str(), "above" | "below") {
+            return Err("請選擇「高於」或「低於」".into());
+        }
+        if !al.price.is_finite() || al.price <= 0.0 {
+            return Err("價格必須大於 0".into());
+        }
+        let mut d = self.data.lock().unwrap();
+        let a = d.assets.iter().find(|a| a.id == al.asset).ok_or("找不到該項目")?;
+        if !a.holding || a.market.is_empty() {
+            return Err("只有有行情代號的持倉可以設定到價通知".into());
+        }
+        if al.id == 0 {
+            if d.alerts.len() >= 100 {
+                return Err("到價通知太多了".into());
+            }
+            d.next_alert += 1;
+            al.id = d.next_alert;
+            d.alerts.push(al);
+        } else {
+            let slot = d.alerts.iter_mut().find(|x| x.id == al.id).ok_or("找不到這個通知")?;
+            *slot = al;
+        }
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn set_app_lock(&self, on: bool) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.app_lock = on;
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn delete_alert(&self, id: u64) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.alerts.retain(|a| a.id != id);
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn save_recurring(&self, mut r: Recurring) -> Result<Value, String> {
+        r.category = r.category.trim().to_string();
+        r.note = r.note.trim().to_string();
+        validate_recurring(&r)?;
+        let mut d = self.data.lock().unwrap();
+        if r.id == 0 {
+            let dev = d.device;
+            r.id = next_record_id(&mut d.next_rec, dev);
+            d.recurring.push(r);
+        } else {
+            let slot = d.recurring.iter_mut().find(|x| x.id == r.id).ok_or("找不到這個固定收支")?;
+            *slot = r;
+        }
+        book_recurring(&mut d, chrono::Local::now().date_naive());
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    fn delete_recurring(&self, id: u64) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        d.recurring.retain(|r| r.id != id); // what it already booked stays in the ledger
+        self.persist(&mut d)?;
+        Ok(view(&d))
+    }
+
+    /// Called at start-up and every hour, on every device (the shared ids keep two devices from booking twice).
+    fn run_recurring(&self) -> Result<Value, String> {
+        let mut d = self.data.lock().unwrap();
+        let added = book_recurring(&mut d, chrono::Local::now().date_naive());
+        if added > 0 {
+            self.persist(&mut d)?;
+        }
+        Ok(json!({ "added": added, "data": view(&d) }))
+    }
+
     fn delete_flow(&self, id: u64) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
         d.cashflow.retain(|f| f.id != id);
@@ -1594,6 +2010,13 @@ impl Core {
         let mut d = self.data.lock().unwrap();
         // The backup only carries finance data; keep this machine's own sync settings.
         inc.channel = d.channel.clone();
+        inc.alerts = d.alerts.clone();
+        inc.app_lock = d.app_lock;
+        inc.widget = d.widget;
+        inc.next_alert = d.next_alert;
+        if inc.prefs != d.prefs {
+            inc.prefs.at = now_ms(); // what was restored is the newest version, also for the paired device
+        }
         inc.sync_enabled = d.sync_enabled;
         inc.sync_port = d.sync_port;
         inc.sync_pin = d.sync_pin.clone();
@@ -1607,6 +2030,7 @@ impl Core {
         inc.next_flow = counter_floor(inc.cashflow.iter().map(|f| f.id), inc.device, inc.next_flow);
         inc.next_goal = counter_floor(inc.goals.iter().map(|g| g.id), inc.device, inc.next_goal);
         inc.next_plan = counter_floor(inc.plans.iter().map(|p| p.id), inc.device, inc.next_plan);
+        inc.next_rec = counter_floor(inc.recurring.iter().map(|r| r.id), inc.device, inc.next_rec);
         let _ = fs::copy(&self.path, self.path.with_extension("before-restore.json"));
         for a in inc.assets.iter_mut() {
             recompute(a);
@@ -2059,8 +2483,9 @@ impl Core {
         for a in d.assets.iter_mut() {
             recompute(a);
         }
+        let hits = check_alerts(&mut d, &stamp);
         self.commit(&mut d)?;
-        Ok(json!({ "data": view(&d), "updated": updated, "rates": fx.len(), "failed": failed }))
+        Ok(json!({ "data": view(&d), "updated": updated, "rates": fx.len(), "failed": failed, "alerts": hits }))
     }
 
     // --------------------------------------------------------------- CSV
@@ -2172,9 +2597,59 @@ impl Core {
         for fl in d.cashflow.iter_mut() {
             fl.amount /= f;
         }
+        for b in d.prefs.budgets.values_mut() {
+            *b /= f;
+        }
+        for r in d.recurring.iter_mut() {
+            r.amount /= f;
+        }
+        if !d.prefs.budgets.is_empty() {
+            d.prefs.at = now_ms();
+        }
         d.base = code;
         d.base_set = true;
         self.commit(&mut d)?;
+        Ok(view(&d))
+    }
+
+    /// Replace the monthly budgets and/or the target allocation (each only when given). Zero entries are dropped.
+    fn set_prefs(&self, budgets: Option<BTreeMap<String, f64>>, alloc: Option<BTreeMap<String, f64>>) -> Result<Value, String> {
+        fn clean(m: BTreeMap<String, f64>, what: &str, max: f64) -> Result<BTreeMap<String, f64>, String> {
+            if m.len() > 50 {
+                return Err(format!("{what}太多項了"));
+            }
+            let mut out = BTreeMap::new();
+            for (k, v) in m {
+                let k = k.trim().to_string();
+                if k.is_empty() || k.chars().count() > 20 {
+                    return Err(format!("{what}的類別名稱需為 1–20 個字"));
+                }
+                if !v.is_finite() || v < 0.0 || v > max {
+                    return Err(format!("「{k}」的{what}不正確"));
+                }
+                if v > 0.0 {
+                    out.insert(k, v);
+                }
+            }
+            Ok(out)
+        }
+        let budgets = budgets.map(|b| clean(b, "預算", 1e15)).transpose()?;
+        let alloc = alloc.map(|a| clean(a, "目標比例", 100.0)).transpose()?;
+        if let Some(a) = &alloc {
+            let total: f64 = a.values().sum();
+            if total > 100.0 + 1e-6 {
+                return Err(format!("目標比例加起來是 {total:.1}%，不能超過 100%"));
+            }
+        }
+        let mut d = self.data.lock().unwrap();
+        if let Some(b) = budgets {
+            d.prefs.budgets = b;
+        }
+        if let Some(a) = alloc {
+            d.prefs.alloc = a;
+        }
+        d.prefs.at = now_ms();
+        self.persist(&mut d)?;
         Ok(view(&d))
     }
 
@@ -2197,7 +2672,7 @@ impl Core {
         if cfg!(target_os = "android") {
             "手機".into()
         } else {
-            std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "電腦".into())
+            computer_name().unwrap_or_else(|| "電腦".into())
         }
     }
 
@@ -2497,10 +2972,14 @@ impl Core {
         let mut c: Vec<PathBuf> = vec![];
         // our own verified copy first
         if let Some(dir) = self.path.parent() {
-            c.push(dir.join("bin").join("cloudflared.exe"));
+            c.push(dir.join("bin").join(CF_EXE));
         }
         if let Some(p) = std::env::var_os("PATH") {
-            c.extend(std::env::split_paths(&p).map(|d| d.join("cloudflared.exe")));
+            c.extend(std::env::split_paths(&p).map(|d| d.join(CF_EXE)));
+        }
+        // apps started from the Dock / a launcher do not get the shell's PATH: Homebrew and the usual places
+        if !cfg!(windows) {
+            c.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].iter().map(|d| PathBuf::from(d).join(CF_EXE)));
         }
         for var in ["ProgramFiles(x86)", "ProgramFiles"] {
             if let Some(b) = std::env::var_os(var) {
@@ -2526,7 +3005,8 @@ impl Core {
         let qr = link.as_deref().and_then(qr_svg);
         // `link` embeds the secret: it is only ever returned to the desktop window, never over HTTP
         json!({ "installed": installed.is_some(), "running": running, "url": url, "link": link, "qr": qr,
-            "winget": winget_available(), "bin_dir": self.bin_dir().map(|p| p.display().to_string()).unwrap_or_default() })
+            "winget": winget_available(), "bin_dir": self.bin_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+            "asset": cloudflared_asset().map(|a| a.0).unwrap_or(""), "exe": CF_EXE })
     }
 
     fn set_progress(&self, active: bool, stage: &str, done: u64, total: u64) {
@@ -2558,7 +3038,7 @@ impl Core {
             "winget" => self.install_with_winget(),
             _ => self.bin_dir().and_then(|dir| {
                 fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                download_cloudflared(&dir.join("cloudflared.exe"), &|st, d, t| self.set_progress(true, st, d, t))
+                download_cloudflared(&dir.join(CF_EXE), &|st, d, t| self.set_progress(true, st, d, t))
             }),
         };
         self.set_progress(false, "", 0, 0);
@@ -2745,7 +3225,7 @@ impl Core {
 
     fn stop_server(&self) {
         if let Some(s) = self.server.lock().unwrap().take() {
-            s.unblock();
+            shutdown_server(s);
         }
     }
 
@@ -2762,6 +3242,57 @@ impl Core {
             }
         });
         Ok(())
+    }
+}
+
+/// Where a crash is written down (Android: MoneyPiApp.kt uses the same file, next to the data file).
+fn crash_path(data: &Path) -> PathBuf {
+    data.with_file_name("moneypi-crash.txt")
+}
+
+/// Rust panics end up in the same report as Java crashes, so the next start can show what happened.
+fn record_panics(file: PathBuf) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = thread::current().name().unwrap_or("?").to_string();
+        let text = format!(
+            "MoneyPi {} · {} · Rust panic · thread {thread}\n\n{info}\n\n{}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::backtrace::Backtrace::force_capture()
+        );
+        let _ = fs::write(&file, text.chars().take(14000).collect::<String>());
+        default(info);
+    }));
+}
+
+/// Stops a sync server and returns once its port is free again (see release_port).
+fn shutdown_server(s: Arc<tiny_http::Server>) -> bool {
+    let port = s.server_addr().to_ip().map(|a| a.port());
+    s.unblock(); // ends the request loop, which drops the last other handle to the server
+    drop(s);
+    port.is_none_or(release_port)
+}
+
+/// Waits until a stopped sync server has really let go of its port.
+/// tiny_http wakes its accept thread by connecting to the address it listens on. For 0.0.0.0 that connection can fail
+/// on Windows (on GitHub's Windows machines it did in one run and not in the next), and then the thread stays blocked
+/// and keeps the port until some other connection happens to arrive: turning phone sync off left the port taken, and
+/// turning it back on failed. Knocking on loopback until the port binds again works everywhere, whatever Windows does.
+/// Returns whether the port is free (false after ~2 s, e.g. when another program took it).
+fn release_port(port: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(s) = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(200)) {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+        thread::sleep(Duration::from_millis(30));
+        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
     }
 }
 
@@ -3055,6 +3586,10 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
             let base = core.data.lock().unwrap().base.clone();
             rate_quote(&arg::<String>(&args, "code")?, &base)
         }
+        "set_prefs" => core.set_prefs(
+            serde_json::from_value(args["budgets"].clone()).map_err(|e| e.to_string())?,
+            serde_json::from_value(args["alloc"].clone()).map_err(|e| e.to_string())?,
+        ),
         "set_channel" if !remote => core.set_channel(&arg::<String>(&args, "channel")?),
         "set_base" if !remote => core.set_base(&arg::<String>(&args, "code")?),
         "import_tracker" => core.import_tracker(&arg::<String>(&args, "text")?),
@@ -3062,6 +3597,14 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "import_csv" => core.import_csv(&arg::<String>(&args, "text")?),
         "add_flow" => core.add_flow(arg(&args, "flow")?),
         "delete_flow" => core.delete_flow(arg(&args, "id")?),
+        "save_recurring" => core.save_recurring(arg(&args, "rule")?),
+        "save_alert" if !remote => core.save_alert(arg(&args, "alert")?),
+        "delete_alert" if !remote => core.delete_alert(arg(&args, "id")?),
+        "set_app_lock" if !remote => core.set_app_lock(arg(&args, "on")?),
+        "set_widget" if !remote => core.set_widget(arg(&args, "on")?),
+        "take_crash" if !remote => Ok(core.take_crash()),
+        "delete_recurring" => core.delete_recurring(arg(&args, "id")?),
+        "run_recurring" => core.run_recurring(),
         "export_backup" => Ok(Value::String(core.export_backup())),
         "import_backup" => core.import_backup(&arg::<String>(&args, "text")?, args["password"].as_str()),
         "tunnel_status" if !remote => Ok(core.tunnel_status()),
@@ -3069,7 +3612,8 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "tunnel_progress" if !remote => Ok(core.tunnel_progress()),
         "open_external" if !remote => {
             let t = arg::<String>(&args, "target")?;
-            if t == "backups" { core.open_backups().map(|_| Value::Null) } else { Err("請在應用程式視窗中開啟連結".into()) } // links go through `call` and the opener plugin
+            let _ = t;
+            Err("請在應用程式視窗中開啟".into()) // links and the backup folder open through `call` and the opener plugin
         }
         "save_plan" => core.save_plan(arg(&args, "plan")?),
         "delete_plan" => core.delete_plan(arg(&args, "id")?),
@@ -3087,17 +3631,62 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
 #[tauri::command]
 async fn call(app: AppHandle, state: State<'_, Arc<Core>>, cmd: String, args: Value) -> Result<Value, String> {
     // Links open through the opener plugin (system browser, also on Android), after the same whitelist check as before.
+    if cmd == "open_external" && args["target"] == "backups" {
+        // Explorer, Finder or the Linux file manager, whichever this computer has
+        let dir = state.inner().backup_dir_ready()?;
+        app.opener().open_path(dir.display().to_string(), None::<&str>).map_err(|e| format!("無法開啟資料夾：{e}"))?;
+        return Ok(Value::Null);
+    }
     if cmd == "open_external" {
-        if let Some(t) = args["target"].as_str().filter(|t| *t != "backups") {
+        if let Some(t) = args["target"].as_str() {
             let url = external_url(t)?;
             app.opener().open_url(url, None::<&str>).map_err(|e| format!("系統瀏覽器無法開啟連結：{e}"))?;
             return Ok(Value::Null);
         }
     }
+    // The phone's lock screen: the system fingerprint / face prompt, with the screen-lock PIN as fallback.
+    if cmd == "bio_auth" {
+        let reason = args["reason"].as_str().unwrap_or("解鎖 MoneyPi").to_string();
+        let app = app.clone();
+        return tauri::async_runtime::spawn_blocking(move || bio_auth(&app, reason)).await.map_err(|e| e.to_string());
+    }
     let core = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || dispatch(&core, &cmd, args, false))
-        .await
-        .map_err(|e| e.to_string())?
+    let c = cmd.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || dispatch(&core, &c, args, false)).await.map_err(|e| e.to_string())??;
+    use tauri_plugin_notification::NotificationExt;
+    // A new price alert: ask for the notification permission once (Android 13+ shows the system question).
+    if cmd == "save_alert" {
+        let n = app.notification();
+        if !matches!(n.permission_state(), Ok(tauri_plugin_notification::PermissionState::Granted)) {
+            let _ = n.request_permission();
+        }
+    }
+    // Prices crossed an alert line: tell the user with a system notification (the page shows a message too).
+    if cmd == "refresh_quotes" {
+        for h in out["alerts"].as_array().into_iter().flatten() {
+            let (title, body) = alert_text(h);
+            let _ = app.notification().builder().title(title).body(body).show();
+        }
+    }
+    Ok(out)
+}
+
+/// {ok} or {ok: false, code, message}. "passcodeNotSet" means the phone has no screen lock at all (nothing to unlock with).
+#[cfg(mobile)]
+fn bio_auth(app: &AppHandle, reason: String) -> Value {
+    use tauri_plugin_biometric::{AuthOptions, BiometricExt};
+    let opts = AuthOptions { allow_device_credential: true, title: Some("MoneyPi".into()), confirmation_required: Some(false), ..Default::default() };
+    match app.biometric().authenticate(reason, opts) {
+        Ok(()) => json!({ "ok": true }),
+        Err(tauri_plugin_biometric::Error::PluginInvoke(tauri::plugin::mobile::PluginInvokeError::InvokeRejected(r))) => {
+            json!({ "ok": false, "code": r.code.unwrap_or_default(), "message": r.message.unwrap_or_default() })
+        }
+        Err(e) => json!({ "ok": false, "code": "error", "message": e.to_string() }),
+    }
+}
+#[cfg(not(mobile))]
+fn bio_auth(_app: &AppHandle, _reason: String) -> Value {
+    json!({ "ok": false, "code": "unsupported", "message": "只有手機版支援" })
 }
 
 // ------------------------------------------------------------ HTTP (LAN sync)
@@ -3210,6 +3799,7 @@ fn qr_svg(text: &str) -> Option<String> {
     xml.find("<svg").map(|i| xml[i..].to_string())
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_private_ip(ip: &str) -> bool {
     ip.starts_with("192.168.")
         || ip.starts_with("10.")
@@ -3261,6 +3851,7 @@ fn sweep_for(id: &str, port: u16, ips: &[String]) -> Option<String> {
 
 /// Private IPv4 addresses of this machine, the default-route one first.
 fn lan_ips() -> Vec<String> {
+    #[cfg_attr(not(windows), allow(unused_mut))] // only Windows adds the ipconfig addresses
     let mut v: Vec<String> = local_ip().into_iter().collect();
     #[cfg(windows)]
     {
@@ -3324,6 +3915,7 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     upd.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
     app.restart()
 }
+#[cfg_attr(not(mobile), allow(dead_code))] // the phone's update check
 const RELEASES_API: &str = "https://api.github.com/repos/hankyleisplay/moneypi/releases";
 /// Update description for the preview channel: always the newest build, preview or stable (the release workflow keeps it).
 const PREVIEW_FEED: &str = "https://github.com/hankyleisplay/moneypi/releases/download/preview-channel/latest.json";
@@ -3399,14 +3991,17 @@ async fn install_update(_app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
-    let builder = builder.plugin(tauri_plugin_opener::init());
+    let builder = builder.plugin(tauri_plugin_opener::init()).plugin(tauri_plugin_notification::init());
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_biometric::init()).plugin(tauri_plugin_barcode_scanner::init());
     builder
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let path = dir.join("moneypi.json");
+            record_panics(crash_path(&path));
             let (mut data, enc) = load_state(&path);
             if cfg!(target_os = "android") {
                 // the phone is a secondary device: it listens (so the computer can find it while the app is open),
@@ -3911,9 +4506,12 @@ mod tests {
         pc.stop_server();
         thread::sleep(Duration::from_millis(200));
         let t = Instant::now();
-        let r = phone.sync_peer().unwrap();
+        // no sweep of the machine's real network here (a_moved_peer_is_found_again_by_its_id covers finding it again)
+        let r = phone.sync_peer_with(&Vec::new).unwrap();
         assert_eq!(r["state"], "offline");
-        assert!(t.elapsed() < Duration::from_secs(6));
+        // Windows retries a refused loopback connection for about 2 s before giving up; elsewhere it fails at once
+        let limit = Duration::from_secs(if cfg!(windows) { 10 } else { 6 });
+        assert!(t.elapsed() < limit, "offline noticed after {:?}", t.elapsed());
         save(&phone, cash("離線新增", 3.0)); // still works offline
         assert!(names(&phone).contains(&"離線新增".to_string()));
 
@@ -4221,6 +4819,304 @@ mod tests {
         ] {
             assert!(external_url(bad).is_err(), "{bad}");
         }
+    }
+
+    // ------------------------------------------------------------- shared budgets / allocation targets
+
+    #[test]
+    fn budgets_and_allocation_targets_are_checked_and_zeroes_dropped() {
+        let c = Arc::new(temp_core("prefs"));
+        let v = dispatch(&c, "set_prefs", json!({ "budgets": { " 餐飲 ": 8000.0, "娛樂": 0.0 } }), false).unwrap();
+        assert_eq!(v["prefs"]["budgets"], json!({ "餐飲": 8000.0 }), "trimmed, and a 0 budget means none");
+        assert_eq!(v["prefs"]["alloc"], json!({}), "alloc untouched when not given");
+        dispatch(&c, "set_prefs", json!({ "alloc": { "股票": 60.0, "現金": 40.0 } }), false).unwrap();
+        assert_eq!(c.data.lock().unwrap().prefs.budgets.len(), 1, "budgets untouched when not given");
+        for bad in [
+            json!({ "alloc": { "股票": 70.0, "現金": 40.0 } }),
+            json!({ "alloc": { "股票": -1.0 } }),
+            json!({ "alloc": { "股票": 101.0 } }),
+            json!({ "budgets": { "": 10.0 } }),
+            json!({ "budgets": { "一二三四五六七八九十一二三四五六七八九十一": 10.0 } }),
+            json!({ "budgets": { "餐飲": -5.0 } }),
+        ] {
+            assert!(dispatch(&c, "set_prefs", bad.clone(), false).is_err(), "{bad}");
+        }
+        assert_eq!(c.data.lock().unwrap().prefs.alloc["股票"], 60.0, "a refused change leaves the old values");
+        let old: Data = serde_json::from_str(r#"{"next_id":0,"assets":[],"snapshots":[]}"#).unwrap();
+        assert_eq!(old.prefs, Prefs::default(), "old data files simply have none");
+    }
+
+    #[test]
+    fn shared_prefs_sync_newest_wins_and_an_older_peer_leaves_them_alone() {
+        let (pc, phone) = pair();
+        dispatch(&pc, "set_prefs", json!({ "budgets": { "餐飲": 8000.0 } }), false).unwrap();
+        exchange(&pc, &phone);
+        assert_eq!(phone.data.lock().unwrap().prefs.budgets["餐飲"], 8000.0);
+        pause();
+        dispatch(&phone, "set_prefs", json!({ "budgets": { "餐飲": 6000.0 }, "alloc": { "股票": 50.0 } }), false).unwrap();
+        exchange(&pc, &phone);
+        assert_eq!(pc.data.lock().unwrap().prefs, phone.data.lock().unwrap().prefs, "the newer change reached the PC");
+        assert_eq!(pc.data.lock().unwrap().prefs.budgets["餐飲"], 6000.0);
+        // an older version sends no prefs at all: ours stay
+        let mut old = sync_payload(&phone.data.lock().unwrap());
+        old.prefs = None;
+        pc.sync(old).unwrap();
+        assert_eq!(pc.data.lock().unwrap().prefs.alloc["股票"], 50.0);
+        // the same JSON an older version would send (no "prefs" key) still parses
+        let mut v = serde_json::to_value(sync_payload(&phone.data.lock().unwrap())).unwrap();
+        v.as_object_mut().unwrap().remove("prefs");
+        assert!(serde_json::from_value::<SyncPayload>(v).unwrap().prefs.is_none());
+    }
+
+    #[test]
+    fn changing_the_main_currency_converts_budgets_too() {
+        let c = Arc::new(temp_core("prefsbase"));
+        dispatch(&c, "set_base", json!({ "code": "TWD" }), false).unwrap();
+        save(&c, cash("存款", 100.0));
+        dispatch(&c, "set_prefs", json!({ "budgets": { "餐飲": 3200.0 }, "alloc": { "現金": 30.0 } }), false).unwrap();
+        let usd = c.data.lock().unwrap().rates["USD"];
+        dispatch(&c, "set_base", json!({ "code": "USD" }), false).unwrap();
+        let d = c.data.lock().unwrap();
+        assert!((d.prefs.budgets["餐飲"] - 3200.0 / usd).abs() < 1e-9);
+        assert_eq!(d.prefs.alloc["現金"], 30.0, "percentages do not change");
+    }
+
+    // ------------------------------------------------------------- fixed income / expenses
+
+    fn rule(kind: &str, amount: f64, day: u32, start: &str) -> Value {
+        json!({ "kind": kind, "category": if kind == "in" { "薪資" } else { "居住" }, "amount": amount, "note": "", "day": day, "start": start })
+    }
+    fn booked(c: &Arc<Core>) -> Vec<(String, f64)> {
+        let mut v: Vec<(String, f64)> = c.data.lock().unwrap().cashflow.iter().filter(|f| f.id >= 1 << 52).map(|f| (f.date.clone(), f.amount)).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    #[test]
+    fn recurring_dates_fall_on_the_day_or_the_months_last_day() {
+        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        let r = Recurring { day: 31, start: "2026-01-15".into(), ..Default::default() };
+        let got: Vec<String> = recurring_dates(&r, d("2026-04-30")).iter().map(|x| x.to_string()).collect();
+        assert_eq!(got, ["2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30"]);
+        let r = Recurring { day: 5, start: "2026-01-06".into(), end: "2026-03-05".into(), ..Default::default() };
+        let got: Vec<String> = recurring_dates(&r, d("2026-12-31")).iter().map(|x| x.to_string()).collect();
+        assert_eq!(got, ["2026-02-05", "2026-03-05"], "not before the start, not after the end");
+        let r = Recurring { day: 1, start: "1990-01-01".into(), ..Default::default() };
+        assert_eq!(recurring_dates(&r, d("2026-01-01")).len(), 120, "a start far back books at most 120 months");
+        assert!(recurring_entry_id(7, "2026-01-01") >= 1 << 52 && recurring_entry_id(7, "2026-01-01") < 1 << 53);
+        assert_ne!(recurring_entry_id(7, "2026-01-01"), recurring_entry_id(7, "2026-02-01"));
+    }
+
+    #[test]
+    fn a_fixed_entry_books_once_and_a_deleted_one_stays_deleted() {
+        let c = Arc::new(temp_core("rec"));
+        let start = (chrono::Local::now().date_naive() - chrono::Duration::days(70)).format("%Y-%m-%d").to_string();
+        let v = dispatch(&c, "save_recurring", json!({ "rule": rule("in", 50000.0, 5, &start) }), false).unwrap();
+        let n = booked(&c).len();
+        assert!((2..=3).contains(&n), "the past two or three months are booked right away ({n})");
+        assert_eq!(v["recurring"].as_array().unwrap().len(), 1);
+        dispatch(&c, "run_recurring", json!({}), false).unwrap();
+        assert_eq!(booked(&c).len(), n, "running again adds nothing");
+        // delete one booked entry: it does not come back
+        let first = c.data.lock().unwrap().cashflow.iter().find(|f| f.id >= 1 << 52).unwrap().id;
+        dispatch(&c, "delete_flow", json!({ "id": first }), false).unwrap();
+        dispatch(&c, "run_recurring", json!({}), false).unwrap();
+        assert_eq!(booked(&c).len(), n - 1);
+        // pausing stops it; editing changes only what comes later; deleting the rule keeps what it booked
+        let id = c.data.lock().unwrap().recurring[0].id;
+        let mut r = rule("in", 1.0, 5, "2020-01-01");
+        r["id"] = json!(id);
+        r["paused"] = json!(true);
+        dispatch(&c, "save_recurring", json!({ "rule": r }), false).unwrap();
+        assert_eq!(booked(&c).len(), n - 1, "paused: nothing new, even with an earlier start");
+        dispatch(&c, "delete_recurring", json!({ "id": id }), false).unwrap();
+        assert!(c.data.lock().unwrap().recurring.is_empty());
+        assert_eq!(booked(&c).len(), n - 1);
+        for bad in [rule("x", 1.0, 5, "2026-01-01"), rule("in", 0.0, 5, "2026-01-01"), rule("in", 1.0, 0, "2026-01-01"), rule("in", 1.0, 32, "2026-01-01"), rule("in", 1.0, 5, "2026/1/1")] {
+            assert!(dispatch(&c, "save_recurring", json!({ "rule": bad.clone() }), false).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn two_devices_book_the_same_fixed_entries_without_duplicates() {
+        let (pc, phone) = pair();
+        let start = (chrono::Local::now().date_naive() - chrono::Duration::days(100)).format("%Y-%m-%d").to_string();
+        dispatch(&pc, "save_recurring", json!({ "rule": rule("out", 12000.0, 1, &start) }), false).unwrap();
+        let on_pc = booked(&pc);
+        exchange(&pc, &phone);
+        dispatch(&phone, "run_recurring", json!({}), false).unwrap(); // the phone books too, on its own
+        dispatch(&pc, "run_recurring", json!({}), false).unwrap();
+        exchange(&pc, &phone);
+        exchange(&pc, &phone);
+        assert_eq!(booked(&pc), on_pc, "the PC has each month once");
+        assert_eq!(booked(&phone), on_pc, "and so has the phone");
+        // a deletion on the phone reaches the PC and is not re-booked there
+        let id = phone.data.lock().unwrap().cashflow.iter().find(|f| f.id >= 1 << 52).unwrap().id;
+        dispatch(&phone, "delete_flow", json!({ "id": id }), false).unwrap();
+        exchange(&pc, &phone);
+        dispatch(&pc, "run_recurring", json!({}), false).unwrap();
+        assert_eq!(booked(&pc).len(), on_pc.len() - 1);
+        // an older peer sends no rules at all: ours stay
+        let mut old = sync_payload(&phone.data.lock().unwrap());
+        old.recurring.clear();
+        old.stamps.retain(|k, _| !k.starts_with("r:"));
+        pc.sync(old).unwrap();
+        assert_eq!(pc.data.lock().unwrap().recurring.len(), 1);
+    }
+
+    #[test]
+    fn changing_the_main_currency_converts_fixed_entries() {
+        let c = Arc::new(temp_core("recbase"));
+        dispatch(&c, "set_base", json!({ "code": "TWD" }), false).unwrap();
+        save(&c, cash("存款", 100.0));
+        dispatch(&c, "save_recurring", json!({ "rule": rule("in", 32000.0, 1, "2099-01-01") }), false).unwrap();
+        let usd = c.data.lock().unwrap().rates["USD"];
+        dispatch(&c, "set_base", json!({ "code": "USD" }), false).unwrap();
+        assert!((c.data.lock().unwrap().recurring[0].amount - 32000.0 / usd).abs() < 1e-9);
+    }
+
+    // ------------------------------------------------------------- price alerts
+
+    #[test]
+    fn price_alerts_fire_once_when_the_price_crosses_and_can_be_re_armed() {
+        let c = Arc::new(temp_core("alerts"));
+        let mut st = stock_json("台積電");
+        st["market"] = json!("tw");
+        st["symbol"] = json!("2330");
+        st["price"] = json!(1000.0);
+        save(&c, st);
+        let id = c.data.lock().unwrap().assets[0].id;
+        save(&c, cash("存款", 1.0));
+        let cash_id = c.data.lock().unwrap().assets[1].id;
+        dispatch(&c, "save_alert", json!({ "alert": { "asset": id, "op": "above", "price": 1100.0 } }), false).unwrap();
+        dispatch(&c, "save_alert", json!({ "alert": { "asset": id, "op": "below", "price": 900.0 } }), false).unwrap();
+        for bad in [json!({ "asset": id, "op": "near", "price": 1.0 }), json!({ "asset": id, "op": "above", "price": 0.0 }), json!({ "asset": cash_id, "op": "above", "price": 1.0 }), json!({ "asset": 999, "op": "above", "price": 1.0 })] {
+            assert!(dispatch(&c, "save_alert", json!({ "alert": bad.clone() }), false).is_err(), "{bad}");
+        }
+        assert!(dispatch(&c, "save_alert", json!({ "alert": { "asset": id, "op": "above", "price": 1.0 } }), true).is_err(), "not from another device");
+        let mut d = c.data.lock().unwrap();
+        assert!(check_alerts(&mut d, "t0").is_empty(), "1000 is between the lines");
+        d.assets[0].price = 1150.0;
+        let hits = check_alerts(&mut d, "t1");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["op"], "above");
+        let (title, body) = alert_text(&hits[0]);
+        assert!(title.contains("台積電") && title.contains("漲"), "{title}");
+        assert!(body.contains("1150") && body.contains("1100"), "{body}");
+        assert!(check_alerts(&mut d, "t2").is_empty(), "fires once");
+        assert_eq!(d.alerts[0].fired, "t1");
+        drop(d);
+        // re-arm by saving it with an empty `fired`
+        let mut al = serde_json::to_value(c.data.lock().unwrap().alerts[0].clone()).unwrap();
+        al["fired"] = json!("");
+        dispatch(&c, "save_alert", json!({ "alert": al }), false).unwrap();
+        assert_eq!(check_alerts(&mut c.data.lock().unwrap(), "t3").len(), 1);
+        dispatch(&c, "delete_alert", json!({ "id": 2 }), false).unwrap();
+        assert_eq!(c.data.lock().unwrap().alerts.len(), 1);
+    }
+
+    #[test]
+    fn price_alerts_stay_on_their_device() {
+        let (pc, phone) = pair();
+        let mut st = stock_json("ETF");
+        st["market"] = json!("tw");
+        st["symbol"] = json!("0050");
+        save(&pc, st);
+        let id = pc.data.lock().unwrap().assets[0].id;
+        dispatch(&pc, "save_alert", json!({ "alert": { "asset": id, "op": "above", "price": 200.0 } }), false).unwrap();
+        exchange(&pc, &phone);
+        assert!(phone.data.lock().unwrap().alerts.is_empty(), "not synced");
+        assert!(!serde_json::to_string(&sync_payload(&pc.data.lock().unwrap())).unwrap().contains("alerts"));
+        // restoring a backup keeps this device's alerts
+        let text = phone.export_backup();
+        pc.import_backup(&text, None).unwrap();
+        assert_eq!(pc.data.lock().unwrap().alerts.len(), 1);
+    }
+
+    // ------------------------------------------------------------- home-screen widget
+
+    #[test]
+    fn a_crash_report_is_shown_once_and_only_on_this_device() {
+        let dir = std::env::temp_dir().join(format!("moneypi-crash-test-{}", random_hex(4)));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("moneypi.json");
+        let c = Arc::new(Core { path: path.clone(), ..test_core() });
+        assert_eq!(dispatch(&c, "take_crash", json!({}), false).unwrap(), Value::Null, "nothing crashed");
+        fs::write(crash_path(&path), "MoneyPi 0.0.0 · Android 14\n\njava.lang.IllegalStateException: boom\n").unwrap();
+        assert!(dispatch(&c, "take_crash", json!({}), true).is_err(), "not readable from another device");
+        let r = dispatch(&c, "take_crash", json!({}), false).unwrap();
+        assert!(r.as_str().unwrap().contains("IllegalStateException: boom"));
+        assert_eq!(dispatch(&c, "take_crash", json!({}), false).unwrap(), Value::Null, "shown once");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_widget_file_is_written_only_when_turned_on() {
+        assert_eq!(grouped(1234567.8), "1,234,568");
+        assert_eq!(grouped(999.0), "999");
+        assert_eq!(grouped(-1500.0), "−1,500");
+        assert_eq!(grouped(0.2), "0");
+        // its own folder: the widget file has a fixed name next to the data file
+        let dir = std::env::temp_dir().join(format!("moneypi-widget-test-{}", random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = Arc::new(Core { path: dir.join("moneypi.json"), ..test_core() });
+        save(&c, cash("存款", 150500.0));
+        assert!(!c.widget_path().exists(), "off by default: nothing on the home screen");
+        dispatch(&c, "set_widget", json!({ "on": true }), false).unwrap();
+        save(&c, cash("另一筆", 1000.0));
+        let w: Value = serde_json::from_str(&std::fs::read_to_string(c.widget_path()).unwrap()).unwrap();
+        assert_eq!(w["enabled"], true);
+        assert_eq!(w["net"], "NT$ 151,500");
+        assert!(dispatch(&c, "set_widget", json!({ "on": true }), true).is_err(), "not from another device");
+        dispatch(&c, "set_widget", json!({ "on": false }), false).unwrap();
+        let w: Value = serde_json::from_str(&std::fs::read_to_string(c.widget_path()).unwrap()).unwrap();
+        assert_eq!(w, json!({ "enabled": false }), "turned off: the amount is gone from the file");
+        let mut d = Data::default();
+        d.snapshots = vec![Snapshot { date: "2026-11-13".into(), assets: 100.0, liabilities: 0.0 }, Snapshot { date: "2026-11-14".into(), assets: 0.0, liabilities: 0.0 }];
+        d.assets.push(Asset { id: 1, name: "x".into(), currency: "TWD".into(), value: 1300.0, ..Default::default() });
+        assert_eq!(widget_json(&d, "t")["change"], "較 11-13：+1,200");
+    }
+
+    // ------------------------------------------------------------- macOS / Linux
+
+    // A sync server as start_server runs it: on every interface, its request loop on its own thread.
+    fn running_sync_server() -> (Arc<tiny_http::Server>, u16) {
+        let server = Arc::new(tiny_http::Server::http(("0.0.0.0", 0)).unwrap());
+        let port = server.server_addr().to_ip().unwrap().port();
+        let looped = server.clone();
+        thread::spawn(move || for _ in looped.incoming_requests() {});
+        (server, port)
+    }
+
+    #[test]
+    fn stopping_the_sync_server_frees_its_port_at_once() {
+        for _ in 0..3 {
+            let (server, port) = running_sync_server();
+            assert!(TcpListener::bind(("0.0.0.0", port)).is_err(), "the server holds its port while running");
+            assert!(shutdown_server(server), "port {port} still taken after stopping");
+            // turning phone sync back on: the same port must be usable right away
+            let again = tiny_http::Server::http(("0.0.0.0", port));
+            assert!(again.is_ok(), "could not listen on {port} again: {:?}", again.err());
+        }
+    }
+
+    #[test]
+    fn cloudflared_and_the_computer_name_work_on_every_desktop() {
+        // this test machine is Linux x86_64: the plain binary, not an archive
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            assert_eq!(cloudflared_asset(), Some(("cloudflared-linux-amd64", false)));
+            assert_eq!(CF_EXE, "cloudflared");
+        }
+        // the macOS archive's program is found wherever it sits inside
+        let dir = std::env::temp_dir().join(format!("moneypi-cf-{}", random_hex(4)));
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("a/README"), "x").unwrap();
+        std::fs::write(dir.join("a/b/cloudflared"), "bin").unwrap();
+        assert_eq!(find_file_named(&dir, "cloudflared", 3), Some(dir.join("a/b/cloudflared")));
+        assert_eq!(find_file_named(&dir, "cloudflared", 0), None, "depth is limited");
+        let _ = std::fs::remove_dir_all(&dir);
+        // never empty, never panics
+        assert!(computer_name().map_or(true, |n| !n.trim().is_empty()));
     }
 
     #[test]

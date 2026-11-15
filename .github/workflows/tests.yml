@@ -1,0 +1,39 @@
+name: Tests
+
+# The Rust tests on each desktop system. Some behaviour differs per platform (sockets, paths), and the release builds
+# do not run tests, so this is where Windows and macOS get checked.
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: ["claude/**"]
+    paths: ["src-tauri/**", ".github/workflows/tests.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: Windows }
+          - { os: macos-latest, name: macOS }
+          - { os: ubuntu-22.04, name: Linux }
+    name: cargo test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --lib
