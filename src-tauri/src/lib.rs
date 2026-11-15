@@ -3275,9 +3275,10 @@ fn shutdown_server(s: Arc<tiny_http::Server>) -> bool {
 }
 
 /// Waits until a stopped sync server has really let go of its port.
-/// tiny_http wakes its accept thread by connecting to the address it listens on. For 0.0.0.0 that connection fails on
-/// Windows, so the thread stayed blocked and kept the port until some other connection happened to arrive: turning
-/// phone sync off left the port taken, and turning it back on failed. Knocking on loopback wakes it everywhere.
+/// tiny_http wakes its accept thread by connecting to the address it listens on. For 0.0.0.0 that connection can fail
+/// on Windows (on GitHub's Windows machines it did in one run and not in the next), and then the thread stays blocked
+/// and keeps the port until some other connection happens to arrive: turning phone sync off left the port taken, and
+/// turning it back on failed. Knocking on loopback until the port binds again works everywhere, whatever Windows does.
 /// Returns whether the port is free (false after ~2 s, e.g. when another program took it).
 fn release_port(port: u16) -> bool {
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -5097,19 +5098,6 @@ mod tests {
             let again = tiny_http::Server::http(("0.0.0.0", port));
             assert!(again.is_ok(), "could not listen on {port} again: {:?}", again.err());
         }
-    }
-
-    // What went wrong before: tiny_http alone. Its own wake-up connects to 0.0.0.0, which Windows refuses, so there the
-    // port stays taken; elsewhere it is released. Kept as a record of the cause (it checks the platform difference).
-    #[test]
-    fn tiny_http_alone_keeps_the_port_on_windows() {
-        let (server, port) = running_sync_server();
-        server.unblock();
-        drop(server);
-        thread::sleep(Duration::from_millis(800));
-        let free = TcpListener::bind(("0.0.0.0", port)).is_ok();
-        assert_eq!(free, !cfg!(windows), "port free after tiny_http's own shutdown: {free}");
-        release_port(port); // let the stuck thread go
     }
 
     #[test]
