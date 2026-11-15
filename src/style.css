@@ -597,7 +597,7 @@ html.dark .bar.glass{background:rgba(18,23,44,.97)!important;box-shadow:0 8px 18
 html.dark.lite .glass,html.dark.lite dialog,html.dark.lite .dd-menu{background:rgba(22,27,50,.97)!important;box-shadow:0 3px 12px rgba(0,0,0,.4)!important}
 html.dark #splash{background:radial-gradient(60vmax 60vmax at 20% 10%,rgba(59,109,255,.35),transparent 60%),radial-gradient(50vmax 50vmax at 85% 80%,rgba(155,77,255,.3),transparent 60%),#0a0e1d}
 html.dark .invest-panel{background:linear-gradient(120deg,rgba(40,52,100,.7),rgba(24,30,56,.8))}
-html.dark .invest-card .official-link{background:rgba(122,162,255,.1);border-color:rgba(122,162,255,.35)}
+html.dark .invest-card .official-link{background:rgba(122,162,255,.16);border-color:rgba(122,162,255,.45);color:#c4d4ff;box-shadow:0 2px 6px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.06)}
 html.dark .invest-card .official-link:hover,html.dark .invest-card .official-link:active{background:rgba(122,162,255,.2)}
 html.dark .holding-value-note,html.dark .url{background:rgba(122,162,255,.1)}
 html.dark .rate-add{background:rgba(10,14,30,.35)}
@@ -705,3 +705,28 @@ html.dark #applock{background:radial-gradient(60vmax 60vmax at 20% 10%,rgba(59,1
 .al-box .primary{margin-top:8px;min-width:160px;height:46px}
 .al-icon{width:76px;height:76px;border-radius:24px;display:grid;place-items:center;color:#fff;background:linear-gradient(145deg,#6ea8ff,#8b5cf6);box-shadow:0 12px 30px rgba(80,95,255,.35)}
 body.locked-app .app{visibility:hidden}
+
+/* ---------- phone app: scanning the computer's QR code (camera behind a transparent page) ---------- */
+html.scanning,html.scanning body,html.scanning .orbs{background:transparent!important}
+html.scanning body>*:not(#scanui){visibility:hidden!important}
+#scanui{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;
+  padding:24px;color:#fff;text-align:center;background:radial-gradient(closest-side,transparent 62%,rgba(0,0,0,.5))}
+#scanui[hidden]{display:none}
+#scanui p{margin:0;max-width:300px;padding:8px 14px;border-radius:12px;background:rgba(0,0,0,.55);font-size:15px;line-height:1.5}
+.scan-frame{position:relative;width:min(68vw,280px);aspect-ratio:1}
+.scan-frame i{position:absolute;width:42px;height:42px;border:4px solid #fff;filter:drop-shadow(0 0 6px rgba(0,0,0,.6))}
+.scan-frame i:nth-child(1){top:0;left:0;border-right:0;border-bottom:0;border-radius:14px 0 0 0}
+.scan-frame i:nth-child(2){top:0;right:0;border-left:0;border-bottom:0;border-radius:0 14px 0 0}
+.scan-frame i:nth-child(3){bottom:0;left:0;border-right:0;border-top:0;border-radius:0 0 0 14px}
+.scan-frame i:nth-child(4){bottom:0;right:0;border-left:0;border-top:0;border-radius:0 0 14px 0}
+#scan-cancel{min-width:140px;padding:12px 22px;border:1px solid rgba(255,255,255,.6);border-radius:14px;background:rgba(0,0,0,.55);color:#fff;font-size:15px}
+.scan-btn{display:inline-flex;align-items:center;gap:8px}
+.scan-note{margin-top:8px}
+.or-line{display:flex;align-items:center;gap:10px;margin:16px 0 4px;color:var(--muted);font-size:12px}
+.or-line::before,.or-line::after{content:"";flex:1;height:1px;background:var(--line)}
+/* the browser version on a phone: what it is, once */
+#web-note{position:fixed;left:12px;right:12px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:40;max-width:560px;margin:0 auto;background:rgba(255,255,255,.98)!important;box-shadow:0 10px 30px rgba(40,60,120,.25)!important;display:flex;gap:12px;align-items:center;
+  padding:12px 14px;border-radius:16px;font-size:13px;line-height:1.55}
+#web-note p{margin:0;flex:1}
+#web-note button{flex:none}
+html.dark #web-note{background:rgba(24,30,56,.98)!important;box-shadow:0 10px 30px rgba(0,0,0,.55)!important}

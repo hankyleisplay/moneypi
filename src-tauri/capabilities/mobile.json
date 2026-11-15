@@ -5,7 +5,8 @@
     "main"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "barcode-scanner:default"
   ],
   "platforms": [
     "android",

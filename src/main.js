@@ -3000,12 +3000,64 @@ if (inTauri) {
       peerErr = String(err);
     } finally { btn.disabled = false; renderPeer(); }
   };
+  $("peer-scan").onclick = scanToBind;
+  $("scan-cancel").onclick = () => window.__TAURI__.core.invoke("plugin:barcode-scanner|cancel").catch(() => {});
   $("peer-off").onclick = async () => {
     if (!(await confirmBox("解除綁定這台裝置？", "兩邊目前的資料都會保留，只是不再自動同步。", "解除綁定"))) return;
     peer = await invoke("unpair_peer"); renderPeer(); toast("已解除綁定");
   };
   document.addEventListener("visibilitychange", () => { if (!document.hidden && Date.now() - peerLast > 20000) syncPeer(false); });
   setInterval(() => { if (!document.hidden) syncPeer(false); }, 5 * 60000);
+}
+
+/* ---------- phone app: bind by scanning the QR code the computer shows ----------
+   The camera runs behind the page (windowed mode), so the page turns transparent and shows only a frame and a cancel button. */
+async function scanToBind() {
+  const core = window.__TAURI__.core;
+  peerErr = "";
+  try {
+    let cam = (await core.invoke("plugin:barcode-scanner|check_permissions")).camera;
+    if (cam !== "granted") cam = (await core.invoke("plugin:barcode-scanner|request_permissions")).camera;
+    if (cam !== "granted") {
+      peerErr = "沒有相機權限，無法掃描。可以到手機「設定 → 應用程式 → MoneyPi → 權限」允許相機，或在下面手動輸入位址與 PIN。";
+      return renderPeer();
+    }
+  } catch (err) { peerErr = "無法使用相機：" + err; return renderPeer(); }
+  const html = document.documentElement;
+  html.classList.add("scanning"); $("scanui").hidden = false;
+  let text = "";
+  try {
+    text = ((await core.invoke("plugin:barcode-scanner|scan", { windowed: true, formats: ["QR_CODE"] })) || {}).content || "";
+  } catch (err) {
+    if (!/cancel/i.test(String(err))) peerErr = "掃描失敗：" + err;
+  } finally { html.classList.remove("scanning"); $("scanui").hidden = true; }
+  if (!text) return renderPeer();
+  const kind = scanKind(text);
+  if (kind !== "lan") {
+    peerErr = kind === "remote"
+      ? "這是「遠端」分頁的 QR Code，手機 App 目前只能在同一個 Wi-Fi 綁定。請在電腦的「手機連線」切到「區域網路」分頁，再掃一次。"
+      : "這不是 MoneyPi 的連線 QR Code。請掃電腦 MoneyPi「手機連線」裡的 QR Code。";
+    return renderPeer();
+  }
+  $("peer-link").value = text; $("peer-pin").value = "";
+  $("peer-bind").click();
+}
+// what a scanned QR code is: the computer's LAN link (http://<ip>:<port>/#pin=…), its remote tunnel link, or something else
+function scanKind(t) {
+  t = String(t).trim();
+  if (/^https:\/\/[a-z0-9-]+\.trycloudflare\.com\//i.test(t) || /\/t\/[0-9a-f]{32}/i.test(t)) return "remote";
+  return /^http:\/\/[^\s/#]+\/?#pin=\d{4,12}$/i.test(t) ? "lan" : "other";
+}
+
+/* ---------- browser version on a phone: say what it is (the computer's data, not the phone app's) ---------- */
+if (!inTauri && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent) && store.get("web_note", "0") !== "1") {
+  const n = document.createElement("div");
+  n.id = "web-note"; n.className = "glass";
+  n.innerHTML = '<p><b>這是瀏覽器版</b>：你看到、修改的是電腦上的資料，不需要安裝。'
+    + (/Android/i.test(navigator.userAgent) ? '已經裝了 MoneyPi App？請在 App 的「連線」頁按「掃描 QR Code」綁定，App 才會同步；用相機掃描只會開到這裡。' : '')
+    + '</p><button type="button">知道了</button>';
+  n.querySelector("button").onclick = () => { store.set("web_note", "1"); n.remove(); };
+  document.body.appendChild(n);
 }
 
 /* ---------- phone app lock (fingerprint / face / screen lock) ---------- */

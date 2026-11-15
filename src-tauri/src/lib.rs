@@ -3930,7 +3930,7 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(mobile)]
-    let builder = builder.plugin(tauri_plugin_biometric::init());
+    let builder = builder.plugin(tauri_plugin_biometric::init()).plugin(tauri_plugin_barcode_scanner::init());
     builder
         .setup(|app| {
             let dir = app.path().app_data_dir()?;

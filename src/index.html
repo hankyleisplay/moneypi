@@ -17,6 +17,11 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div id="scanui" hidden>
+  <div class="scan-frame"><i></i><i></i><i></i><i></i></div>
+  <p>對準電腦 MoneyPi「手機連線」裡的 QR Code</p>
+  <button type="button" id="scan-cancel">取消</button>
+</div>
 <div id="applock" hidden role="dialog" aria-modal="true" aria-labelledby="al-title">
   <div class="al-box">
     <div class="al-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="38" height="38" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/><circle cx="12" cy="15.5" r="1.3"/></svg></div>
@@ -203,12 +208,15 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
         <h3>綁定電腦</h3>
         <ol class="steps">
           <li>電腦要先更新到最新版 MoneyPi 並開著，手機與電腦連到<b>同一個 Wi-Fi</b>。</li>
-          <li>在電腦的 MoneyPi 按標題列的手機圖示（<b>手機連線</b>），開啟「啟用手機連線」，會看到位址與 PIN。</li>
-          <li>把位址與 PIN 輸入下面（也可以直接貼上整條連結，PIN 會自動帶入），按「綁定並同步」。</li>
+          <li>在電腦的 MoneyPi 按標題列的手機圖示（<b>手機連線</b>），開啟「啟用手機連線」，會出現 QR Code。</li>
+          <li>按下面的「掃描 QR Code」，對準電腦上的 QR Code，就會自動綁定並同步。</li>
         </ol>
+        <div class="btns"><button type="button" id="peer-scan" class="primary scan-btn"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 9v6M11 9v6M14 9v6M17 9v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>掃描 QR Code</span></button></div>
+        <p class="hint scan-note">請用<b>這裡的按鈕</b>掃描，不要用手機的相機 App：相機會用瀏覽器打開「瀏覽器版」，那是直接操作電腦上的資料，不會和這支 App 同步。</p>
+        <p class="or-line"><span>或手動輸入</span></p>
         <label>電腦位址或連結<input id="peer-link" placeholder="例如 192.168.1.5:8787，或貼上手機連線的網址" autocomplete="off" inputmode="url"></label>
         <label>PIN<input id="peer-pin" inputmode="numeric" autocomplete="off" placeholder="電腦「手機連線」裡的 PIN；貼上連結時可留空"></label>
-        <div class="btns"><button type="button" id="peer-bind" class="primary">綁定並同步</button></div>
+        <div class="btns"><button type="button" id="peer-bind">綁定並同步</button></div>
       </div>
 
       <div class="glass panel desk-only" hidden>
@@ -388,8 +396,8 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
     <details class="help droid-only" hidden><summary>綁定電腦並自動同步</summary>
       <ol>
         <li>電腦的 MoneyPi 更新到最新版，手機與電腦連到<b>同一個 Wi-Fi</b>。</li>
-        <li>在電腦按標題列的手機圖示，開啟「啟用手機連線」，記下位址與 PIN。</li>
-        <li>手機這邊點左邊的<b>「連線」</b>，輸入位址與 PIN（或貼上整條連結），按「綁定並同步」。</li>
+        <li>在電腦按標題列的手機圖示，開啟「啟用手機連線」，會出現 QR Code、位址與 PIN。</li>
+        <li>手機這邊點左邊的<b>「連線」</b>，按<b>「掃描 QR Code」</b>對準電腦上的 QR Code（或手動輸入位址與 PIN），就會綁定並同步。請用 App 裡的按鈕掃，用相機 App 掃會打開瀏覽器版，那不會和 App 同步。</li>
       </ol>
       <p>綁定後，每次開啟 App、回到畫面、修改資料後與每 5 分鐘都會自動找電腦；找到就雙向合併。兩邊各自新增的資料不會撞號，刪除也會同步。標題列的小標籤會顯示「已同步」「同步中」或「電腦未連線」。</p>
     </details>
@@ -644,7 +652,7 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
     <h3>手機連線</h3>
     <div class="seg" id="ph-tabs"><button type="button" data-t="lan" class="on">區域網路（同一個 Wi-Fi）</button><button type="button" data-t="remote">遠端（不限網路）</button></div>
     <div id="ph-lan">
-    <p class="muted">讓手機、平板在同一個 Wi-Fi 下，用瀏覽器開啟 MoneyPi。資料仍存在這台電腦，兩邊即時同步。</p>
+    <p class="muted"><b>手機 App：</b>在 App 的「連線」頁按「掃描 QR Code」掃下面的 QR Code，綁定後兩邊各存一份、自動同步。<br><b>沒有 App（iPhone、平板）：</b>用相機掃描，會在瀏覽器開啟「瀏覽器版」，直接看、改這台電腦上的資料。兩種都要在同一個 Wi-Fi。</p>
     <label class="chk"><input id="sync-on" type="checkbox"><span class="box"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>啟用手機連線</span></label>
     <div class="two">
       <label>PIN（4–12 位數字）<input id="sync-pin" inputmode="numeric" autocomplete="off" placeholder="留空自動產生"></label>
@@ -654,7 +662,7 @@ try { var t = localStorage.getItem("theme") || "auto"; if (t === "dark" || (t ==
     <div id="ph-conn" class="conn" hidden>
       <div id="ph-qr" class="qr"></div>
       <div class="conn-t">
-        <p class="muted">用手機相機掃描 QR Code 即可連線；或在手機瀏覽器輸入：</p>
+        <p class="muted">手機 App 請用 App 內的「掃描 QR Code」；或在 App／瀏覽器輸入：</p>
         <div id="ph-urls"></div>
         <p class="hint">連線為區網 HTTP（未加密），請只在可信任的網路使用。</p>
       </div>
