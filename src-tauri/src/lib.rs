@@ -4505,9 +4505,12 @@ mod tests {
         pc.stop_server();
         thread::sleep(Duration::from_millis(200));
         let t = Instant::now();
-        let r = phone.sync_peer().unwrap();
+        // no sweep of the machine's real network here (a_moved_peer_is_found_again_by_its_id covers finding it again)
+        let r = phone.sync_peer_with(&Vec::new).unwrap();
         assert_eq!(r["state"], "offline");
-        assert!(t.elapsed() < Duration::from_secs(6));
+        // Windows retries a refused loopback connection for about 2 s before giving up; elsewhere it fails at once
+        let limit = Duration::from_secs(if cfg!(windows) { 10 } else { 6 });
+        assert!(t.elapsed() < limit, "offline noticed after {:?}", t.elapsed());
         save(&phone, cash("離線新增", 3.0)); // still works offline
         assert!(names(&phone).contains(&"離線新增".to_string()));
 
