@@ -2021,6 +2021,19 @@ function saveText(name, text, mime, what) {
   openTextDialog({ title: `匯出${what}`, hint: "按「複製」後貼到筆記或訊息保存；也可按「分享」傳給其他 App。", text, readonly: true, shareName: name });
 }
 
+/* ---------- the app stopped last time: show what went wrong, so it can be passed on ---------- */
+async function showCrashReport() {
+  let text = null;
+  try { text = await invoke("take_crash"); } catch { return; }
+  if (!text) return;
+  if (xdlg.open) await new Promise((r) => xdlg.addEventListener("close", r, { once: true }));
+  openTextDialog({
+    title: "MoneyPi 上次意外關閉了",
+    hint: "下面是當時的錯誤紀錄（只有錯誤訊息和手機型號，沒有你的資產資料）。請按「複製」或「分享」傳給開發者，幫助修正問題。這份紀錄只會顯示這一次。",
+    text, readonly: true, shareName: "MoneyPi 錯誤紀錄",
+  });
+}
+
 /* ---------- CSV export / import ---------- */
 $("export-btn").onclick = async () => {
   try {
@@ -3150,6 +3163,7 @@ async function boot() {
     else render();
   }
   refreshPeer().then(() => syncPeer(false)); // on every start: is the bound device on? then sync
+  if (inTauri) showCrashReport();
   scheduleRefresh();
   if (inTauri && data.refresh_sec > 0) doRefresh(false);
   runPlans(false).then(() => runDividends(false)).then(runRecurring);

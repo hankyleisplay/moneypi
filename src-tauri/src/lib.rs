@@ -5,7 +5,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
-    net::UdpSocket,
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{mpsc, Arc, Mutex},
@@ -1645,6 +1645,19 @@ impl Core {
         self.path.with_file_name("moneypi-widget.json")
     }
 
+    /// Why the app stopped last time, if it crashed (written by MoneyPiApp.kt on Android, or the panic hook), once:
+    /// the report is removed when read.
+    fn take_crash(&self) -> Value {
+        let f = crash_path(&self.path);
+        match fs::read_to_string(&f) {
+            Ok(t) => {
+                let _ = fs::remove_file(&f);
+                json!(t.trim())
+            }
+            Err(_) => Value::Null,
+        }
+    }
+
     fn set_widget(&self, on: bool) -> Result<Value, String> {
         let mut d = self.data.lock().unwrap();
         d.widget = on;
@@ -3212,7 +3225,7 @@ impl Core {
 
     fn stop_server(&self) {
         if let Some(s) = self.server.lock().unwrap().take() {
-            s.unblock();
+            shutdown_server(s);
         }
     }
 
@@ -3229,6 +3242,56 @@ impl Core {
             }
         });
         Ok(())
+    }
+}
+
+/// Where a crash is written down (Android: MoneyPiApp.kt uses the same file, next to the data file).
+fn crash_path(data: &Path) -> PathBuf {
+    data.with_file_name("moneypi-crash.txt")
+}
+
+/// Rust panics end up in the same report as Java crashes, so the next start can show what happened.
+fn record_panics(file: PathBuf) {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = thread::current().name().unwrap_or("?").to_string();
+        let text = format!(
+            "MoneyPi {} · {} · Rust panic · thread {thread}\n\n{info}\n\n{}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::backtrace::Backtrace::force_capture()
+        );
+        let _ = fs::write(&file, text.chars().take(14000).collect::<String>());
+        default(info);
+    }));
+}
+
+/// Stops a sync server and returns once its port is free again (see release_port).
+fn shutdown_server(s: Arc<tiny_http::Server>) -> bool {
+    let port = s.server_addr().to_ip().map(|a| a.port());
+    s.unblock(); // ends the request loop, which drops the last other handle to the server
+    drop(s);
+    port.is_none_or(release_port)
+}
+
+/// Waits until a stopped sync server has really let go of its port.
+/// tiny_http wakes its accept thread by connecting to the address it listens on. For 0.0.0.0 that connection fails on
+/// Windows, so the thread stayed blocked and kept the port until some other connection happened to arrive: turning
+/// phone sync off left the port taken, and turning it back on failed. Knocking on loopback wakes it everywhere.
+/// Returns whether the port is free (false after ~2 s, e.g. when another program took it).
+fn release_port(port: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Ok(s) = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_millis(200)) {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+        thread::sleep(Duration::from_millis(30));
+        if TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
     }
 }
 
@@ -3538,6 +3601,7 @@ fn dispatch(core: &Arc<Core>, cmd: &str, args: Value, remote: bool) -> Result<Va
         "delete_alert" if !remote => core.delete_alert(arg(&args, "id")?),
         "set_app_lock" if !remote => core.set_app_lock(arg(&args, "on")?),
         "set_widget" if !remote => core.set_widget(arg(&args, "on")?),
+        "take_crash" if !remote => Ok(core.take_crash()),
         "delete_recurring" => core.delete_recurring(arg(&args, "id")?),
         "run_recurring" => core.run_recurring(),
         "export_backup" => Ok(Value::String(core.export_backup())),
@@ -3936,6 +4000,7 @@ pub fn run() {
             let dir = app.path().app_data_dir()?;
             fs::create_dir_all(&dir)?;
             let path = dir.join("moneypi.json");
+            record_panics(crash_path(&path));
             let (mut data, enc) = load_state(&path);
             if cfg!(target_os = "android") {
                 // the phone is a secondary device: it listens (so the computer can find it while the app is open),
@@ -4967,6 +5032,21 @@ mod tests {
     // ------------------------------------------------------------- home-screen widget
 
     #[test]
+    fn a_crash_report_is_shown_once_and_only_on_this_device() {
+        let dir = std::env::temp_dir().join(format!("moneypi-crash-test-{}", random_hex(4)));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("moneypi.json");
+        let c = Arc::new(Core { path: path.clone(), ..test_core() });
+        assert_eq!(dispatch(&c, "take_crash", json!({}), false).unwrap(), Value::Null, "nothing crashed");
+        fs::write(crash_path(&path), "MoneyPi 0.0.0 · Android 14\n\njava.lang.IllegalStateException: boom\n").unwrap();
+        assert!(dispatch(&c, "take_crash", json!({}), true).is_err(), "not readable from another device");
+        let r = dispatch(&c, "take_crash", json!({}), false).unwrap();
+        assert!(r.as_str().unwrap().contains("IllegalStateException: boom"));
+        assert_eq!(dispatch(&c, "take_crash", json!({}), false).unwrap(), Value::Null, "shown once");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_widget_file_is_written_only_when_turned_on() {
         assert_eq!(grouped(1234567.8), "1,234,568");
         assert_eq!(grouped(999.0), "999");
@@ -4994,6 +5074,40 @@ mod tests {
     }
 
     // ------------------------------------------------------------- macOS / Linux
+
+    // A sync server as start_server runs it: on every interface, its request loop on its own thread.
+    fn running_sync_server() -> (Arc<tiny_http::Server>, u16) {
+        let server = Arc::new(tiny_http::Server::http(("0.0.0.0", 0)).unwrap());
+        let port = server.server_addr().to_ip().unwrap().port();
+        let looped = server.clone();
+        thread::spawn(move || for _ in looped.incoming_requests() {});
+        (server, port)
+    }
+
+    #[test]
+    fn stopping_the_sync_server_frees_its_port_at_once() {
+        for _ in 0..3 {
+            let (server, port) = running_sync_server();
+            assert!(TcpListener::bind(("0.0.0.0", port)).is_err(), "the server holds its port while running");
+            assert!(shutdown_server(server), "port {port} still taken after stopping");
+            // turning phone sync back on: the same port must be usable right away
+            let again = tiny_http::Server::http(("0.0.0.0", port));
+            assert!(again.is_ok(), "could not listen on {port} again: {:?}", again.err());
+        }
+    }
+
+    // What went wrong before: tiny_http alone. Its own wake-up connects to 0.0.0.0, which Windows refuses, so there the
+    // port stays taken; elsewhere it is released. Kept as a record of the cause (it checks the platform difference).
+    #[test]
+    fn tiny_http_alone_keeps_the_port_on_windows() {
+        let (server, port) = running_sync_server();
+        server.unblock();
+        drop(server);
+        thread::sleep(Duration::from_millis(800));
+        let free = TcpListener::bind(("0.0.0.0", port)).is_ok();
+        assert_eq!(free, !cfg!(windows), "port free after tiny_http's own shutdown: {free}");
+        release_port(port); // let the stuck thread go
+    }
 
     #[test]
     fn cloudflared_and_the_computer_name_work_on_every_desktop() {
