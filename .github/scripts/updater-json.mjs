@@ -6,7 +6,8 @@
 //     assets.json: `gh release view vX --json assets` output; sig-dir: the downloaded *.sig files
 //
 // Platforms (what the Tauri updater asks for): windows-x86_64 = NSIS setup.exe, darwin-aarch64 / darwin-x86_64 = the
-// .app.tar.gz (one universal build serves both), linux-x86_64 = the AppImage.
+// .app.tar.gz (one universal build serves both), linux-x86_64 = the AppImage; plus one entry per installer kind
+// (windows-x86_64-msi, linux-x86_64-deb, ...) so each copy is updated with the same kind of installer it came from.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -47,9 +48,20 @@ export function updaterJson({ version, notes, names, sig, repo, now = new Date()
     else if (/aarch64|arm64/i.test(n)) platforms["darwin-aarch64"] = e;
     else if (/x64|x86_64|amd64/i.test(n)) platforms["darwin-x86_64"] = e;
   }
-  const appimage = names.find((n) => n.endsWith(".AppImage") && /amd64|x86_64/i.test(n)) ?? names.find((n) => n.endsWith(".AppImage"));
+  const linux = (ext) => names.find((n) => n.endsWith(ext) && /amd64|x86_64/i.test(n)) ?? names.find((n) => n.endsWith(ext));
+  const appimage = linux(".AppImage");
   if (entry(appimage)) platforms["linux-x86_64"] = entry(appimage);
+  // The updater first looks for "{os}-{arch}-{installer}" (how this copy was installed: nsis, msi, app, appimage, deb,
+  // rpm), then for "{os}-{arch}". Without these, a copy installed from the MSI would be updated with the NSIS setup and
+  // a .deb install would be handed the AppImage (which it refuses).
   const want = ["windows-x86_64", "darwin-aarch64", "darwin-x86_64", "linux-x86_64"];
+  const same = { "windows-x86_64-nsis": "windows-x86_64", "darwin-aarch64-app": "darwin-aarch64", "darwin-x86_64-app": "darwin-x86_64", "linux-x86_64-appimage": "linux-x86_64" };
+  for (const [k, from] of Object.entries(same)) if (platforms[from]) platforms[k] = platforms[from];
+  for (const [k, file] of [["windows-x86_64-msi", names.find((n) => n.endsWith(".msi"))], ["linux-x86_64-deb", linux(".deb")], ["linux-x86_64-rpm", linux(".rpm")]]) {
+    if (!file) continue; // that kind of installer is not part of this release
+    want.push(k); // it is: then its update entry (file + signature) must be there too
+    if (entry(file)) platforms[k] = entry(file);
+  }
   const lacking = want.filter((p) => !platforms[p]);
   return { json: { version, notes: notes.trim(), pub_date: now.toISOString(), platforms }, lacking };
 }

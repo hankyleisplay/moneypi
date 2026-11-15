@@ -9,7 +9,8 @@ import { releaseBody } from "./release-body.mjs";
 // what tauri-action uploads for one stable release (names as it builds them)
 const stable = ["MoneyPi_0.23.0_x64-setup.exe", "MoneyPi_0.23.0_x64-setup.exe.sig", "MoneyPi_0.23.0_x64_en-US.msi", "MoneyPi_0.23.0_x64_en-US.msi.sig",
   "MoneyPi_0.23.0_universal.dmg", "MoneyPi_universal.app.tar.gz", "MoneyPi_universal.app.tar.gz.sig",
-  "MoneyPi_0.23.0_amd64.AppImage", "MoneyPi_0.23.0_amd64.AppImage.sig", "MoneyPi_0.23.0_amd64.deb", "MoneyPi-0.23.0-1.x86_64.rpm", "latest.json"];
+  "MoneyPi_0.23.0_amd64.AppImage", "MoneyPi_0.23.0_amd64.AppImage.sig", "MoneyPi_0.23.0_amd64.deb", "MoneyPi_0.23.0_amd64.deb.sig",
+  "MoneyPi-0.23.0-1.x86_64.rpm", "MoneyPi-0.23.0-1.x86_64.rpm.sig", "latest.json"];
 assert.deepEqual(missingAssets("0.23.0", stable), []);
 assert.deepEqual(missingAssets("0.23.0", stable.filter((n) => !n.endsWith(".dmg"))), ["macOS 磁碟映像 (.dmg)"]);
 assert.deepEqual(missingAssets("0.23.0", stable.filter((n) => !n.endsWith(".rpm") && !n.includes(".msi"))).sort(), ["Linux .rpm", "Windows MSI", "Windows MSI 簽章"].sort());
@@ -20,8 +21,24 @@ const sig = (n) => (n.endsWith(".sig") ? undefined : `SIG(${n})\n`);
 const { json, lacking } = updaterJson({ version: "0.23.0", notes: " notes \n", names: stable, sig, repo: "o/r", now: new Date("2026-01-01T00:00:00Z") });
 assert.deepEqual(lacking, []);
 assert.equal(json.notes, "notes");
-assert.deepEqual(Object.keys(json.platforms).sort(), ["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]);
+assert.deepEqual(Object.keys(json.platforms).sort(), ["darwin-aarch64", "darwin-aarch64-app", "darwin-x86_64", "darwin-x86_64-app",
+  "linux-x86_64", "linux-x86_64-appimage", "linux-x86_64-deb", "linux-x86_64-rpm", "windows-x86_64", "windows-x86_64-msi", "windows-x86_64-nsis"]);
 assert.equal(json.platforms["windows-x86_64"].url, "https://github.com/o/r/releases/download/v0.23.0/MoneyPi_0.23.0_x64-setup.exe", "NSIS, not the MSI");
+// each install kind is updated with its own kind of installer (what v0.21.1's latest.json did too)
+assert.match(json.platforms["windows-x86_64-msi"].url, /_x64_en-US\.msi$/, "an MSI install gets the MSI");
+assert.equal(json.platforms["windows-x86_64-msi"].signature, "SIG(MoneyPi_0.23.0_x64_en-US.msi)");
+assert.equal(json.platforms["windows-x86_64-nsis"].url, json.platforms["windows-x86_64"].url);
+assert.match(json.platforms["linux-x86_64-deb"].url, /_amd64\.deb$/, "a .deb install gets the .deb, not the AppImage");
+assert.match(json.platforms["linux-x86_64-rpm"].url, /\.rpm$/);
+assert.match(json.platforms["linux-x86_64-appimage"].url, /AppImage$/);
+assert.equal(json.platforms["darwin-aarch64-app"].url, json.platforms["darwin-aarch64"].url);
+// an MSI (or .deb) in the release without its signature: stop, or those installs would get the wrong installer
+const noMsiSig = updaterJson({ version: "0.23.0", notes: "", names: stable, sig: (n) => (n.endsWith(".msi") ? undefined : "s"), repo: "o/r" });
+assert.deepEqual(noMsiSig.lacking, ["windows-x86_64-msi"]);
+// a preview has no MSI / rpm: then no entries and nothing lacking for them
+const pv = updaterJson({ version: "0.23.0-preview.1", notes: "", names: preview, sig: () => "s", repo: "o/r" });
+assert.deepEqual(pv.lacking, []);
+assert.ok(!pv.json.platforms["windows-x86_64-msi"] && !pv.json.platforms["linux-x86_64-rpm"] && pv.json.platforms["linux-x86_64-deb"]);
 assert.equal(json.platforms["windows-x86_64"].signature, "SIG(MoneyPi_0.23.0_x64-setup.exe)");
 assert.equal(json.platforms["darwin-aarch64"].url, json.platforms["darwin-x86_64"].url, "one universal app serves both Macs");
 assert.match(json.platforms["linux-x86_64"].url, /AppImage$/);
@@ -49,7 +66,7 @@ writeFileSync(join(dir, "assets.json"), JSON.stringify({ assets: stable.map((nam
 writeFileSync(join(dir, "notes.md"), "Notes");
 const script = new URL("./updater-json.mjs", import.meta.url).pathname;
 execFileSync("node", [script, "0.23.0", join(dir, "notes.md"), join(dir, "assets.json"), join(dir, "sigs"), join(dir, "latest.json"), "o/r"]);
-assert.equal(Object.keys(JSON.parse(readFileSync(join(dir, "latest.json"), "utf8")).platforms).length, 4);
+assert.equal(Object.keys(JSON.parse(readFileSync(join(dir, "latest.json"), "utf8")).platforms).length, 11);
 writeFileSync(join(dir, "assets.json"), JSON.stringify({ assets: stable.filter((n) => !n.endsWith(".AppImage")).map((name) => ({ name })) }));
 assert.throws(() => execFileSync("node", [script, "0.23.0", join(dir, "notes.md"), join(dir, "assets.json"), join(dir, "sigs"), join(dir, "x.json"), "o/r"], { stdio: "pipe" }), "a missing file stops the release");
 execFileSync("node", [new URL("./release-body.mjs", import.meta.url).pathname, "0.23.0", join(dir, "notes.md"), dir]);
